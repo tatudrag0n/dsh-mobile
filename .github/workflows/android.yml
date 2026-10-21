@@ -24,7 +24,7 @@ jobs:
         # Without a signing key the release build falls back to the debug key,
         # which is enough to sideload the app. A release build signed with the
         # project's own key is produced locally; see README.md.
-        run: gradle assembleRelease --no-daemon
+        run: ./gradlew assembleRelease --no-daemon
 
       - uses: actions/upload-artifact@v4
         with:
