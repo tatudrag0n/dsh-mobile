@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      # The tag build attaches its APK to the release.
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
