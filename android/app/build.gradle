@@ -1,0 +1,54 @@
+plugins {
+	id 'com.android.application'
+}
+
+android {
+	namespace 'dev.tatudrag0n.dshmobile'
+	compileSdk 35
+
+	defaultConfig {
+		applicationId 'dev.tatudrag0n.dshmobile'
+		minSdk 24
+		targetSdk 35
+		versionCode 1
+		versionName '1.0.0'
+	}
+
+	signingConfigs {
+		release {
+			// The keystore is not in the repository; see README.md. Without it
+			// the release build falls back to the debug key.
+			def keystore = rootProject.file('dsh-mobile.keystore')
+			if (keystore.exists()) {
+				storeFile keystore
+				storePassword System.getenv('DSH_MOBILE_KEYSTORE_PASSWORD') ?: 'dsh-mobile'
+				keyAlias System.getenv('DSH_MOBILE_KEY_ALIAS') ?: 'dsh-mobile'
+				keyPassword System.getenv('DSH_MOBILE_KEY_PASSWORD') ?: 'dsh-mobile'
+			}
+		}
+	}
+
+	buildTypes {
+		release {
+			minifyEnabled false
+			signingConfig rootProject.file('dsh-mobile.keystore').exists()
+				? signingConfigs.release
+				: signingConfigs.debug
+		}
+		debug {
+			applicationIdSuffix '.debug'
+			versionNameSuffix '-debug'
+		}
+	}
+
+	compileOptions {
+		sourceCompatibility JavaVersion.VERSION_17
+		targetCompatibility JavaVersion.VERSION_17
+	}
+
+	// The app has no dependencies on purpose: it is a WebView, and every
+	// library would only add weight to a download the phone fetches once.
+	lint {
+		abortOnError false
+	}
+}

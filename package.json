@@ -1,0 +1,45 @@
+{
+  "name": "@local/dsh-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phone-oriented surface for DeepSeek Harness: LAN pairing, PWA install, mobile layout, and an offline outbox that flushes automatically when the connection returns.",
+  "license": "MIT",
+  "author": "tatudrag0n",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./lib/host": "./lib/host.js",
+    "./assets/pages.js": "./assets/pages.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*",
+    "cordis.patch.yml",
+    "lan.patch.yml",
+    "dsh-mobile.ps1",
+    "assets/*",
+    "vendor/qrcode.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:live": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  }
+}

@@ -1,0 +1,18 @@
+# LAN exposure overlay for the shared DSH Web host.
+#
+# The webserver row's whole config is restated here: a patch replaces the
+# targeted row's config rather than merging into it.
+#
+# host 0.0.0.0 binds every local interface. The CLI refuses `--host 0.0.0.0`
+# on the command line, but the profile patch layer is the supported override
+# mechanism, and the webserver's own schema accepts the wildcard. The trust
+# fence derives its LAN authorities from the active bind (resolveLanTrust), so
+# the concrete IPv4 addresses of this machine become trusted hosts and the
+# phone's Host header is admitted.
+- id: webserver
+  config:
+    host: !!js process.env.DSH_MOBILE_BIND ?? '0.0.0.0'
+    port: !!js Number(process.env.DSH_MOBILE_PORT ?? 3080)
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024

@@ -1,0 +1,23 @@
+# Build output
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/captures/
+
+# Signing material: the keystore never belongs in the repository
+*.keystore
+*.jks
+keystore.properties
+
+# Runtime artefacts of the host
+host.log
+host.log.err
+.token
+*.log
+
+# Editors and tooling
+node_modules/
+.DS_Store
+.idea/
+*.iml

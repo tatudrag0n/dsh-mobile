@@ -1,0 +1,25 @@
+# DSH Mobile: the phone-facing surface of the Web host.
+#
+# The bundle owns two halves:
+#
+#   index.js  (host)  pairing endpoints, the PWA service worker and manifest
+#                      routes, and the index injection the client half reads.
+#   client.js (browser) the mobile layout, the PWA install path, the sync
+#                      status chip, and the offline outbox.
+#
+# Optional row config (defaults in parentheses):
+#
+#   pin        pairing PIN the phone must present before the host reveals its
+#              launch URL ('' = a fresh six-digit PIN at every boot)
+#   pairPath   URL prefix of the pairing surface ('/mobile')
+#   lanUrls    extra hosts the pairing card advertises ([])
+#   maxFailedPinAttempts  wrong-PIN attempts allowed per client before the
+#              pairing endpoint locks for that client (5)
+#   lockoutMinutes       minutes a locked client waits (10)
+- insert:
+    - id: dsh-mobile
+      name: '@local/dsh-mobile'
+      config:
+        pairPath: '/mobile'
+        maxFailedPinAttempts: 5
+        lockoutMinutes: 10

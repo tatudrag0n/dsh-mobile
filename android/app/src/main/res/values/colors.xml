@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<!-- The colours of the Harness shell, so the native chrome and the web
+	     app read as one surface. -->
+	<color name="dsh_background">#FF15171C</color>
+	<color name="dsh_surface">#FF1C1F26</color>
+	<color name="dsh_border">#FF2B2F38</color>
+	<color name="dsh_text">#FFE5E7EB</color>
+	<color name="dsh_text_dim">#FF9CA3AF</color>
+	<color name="dsh_accent">#FF7C8CF8</color>
+	<color name="dsh_on_accent">#FF10131A</color>
+	<color name="dsh_error">#FFF87171</color>
+</resources>

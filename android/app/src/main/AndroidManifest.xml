@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+	<!-- The app talks to the PC's DSH Host over the local network. -->
+	<uses-permission android:name="android.permission.INTERNET" />
+	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+	<!-- The DSH voice input bundle records from the microphone. -->
+	<uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+	<uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+	<application
+		android:allowBackup="false"
+		android:icon="@mipmap/ic_launcher"
+		roundIcon="@mipmap/ic_launcher_round"
+		android:label="@string/app_name"
+		android:supportsRtl="true"
+		android:hardwareAccelerated="true"
+		android:theme="@style/Theme.DshMobile"
+		android:usesCleartextTraffic="true">
+
+		<activity
+			android:name=".MainActivity"
+			android:exported="true"
+			android:label="@string/app_name"
+			android:launchMode="singleTop"
+			android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+			android:windowSoftInputMode="adjustResize"
+			android:enableOnBackInvokedCallback="false">
+			<intent-filter>
+				<action android:name="android.intent.action.MAIN" />
+				<category android:name="android.intent.category.LAUNCHER" />
+			</intent-filter>
+		</activity>
+	</application>
+</manifest>

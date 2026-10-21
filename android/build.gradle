@@ -1,0 +1,12 @@
+// The root project of the DSH Mobile Android app.
+//
+// The app is a thin native shell around the same Web UI the PC uses: the
+// phone talks to the PC's DSH Host directly, so the app itself has no server
+// side and no state of its own beyond the host address.
+plugins {
+	id 'com.android.application' version '8.11.1' apply false
+}
+
+tasks.register('clean', Delete) {
+	delete rootProject.layout.buildDirectory
+}

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="app_name">DSH Mobile</string>
+	<string name="setup_title">DSH ホストに接続</string>
+	<string name="setup_subtitle">PC と同じ Wi-Fi にある DSH ホストのアドレスを入力してください。例: 192.168.0.166:3080</string>
+	<string name="setup_hint">接続すると、PC に表示されているペアリングPINの入力画面が開きます。PIN は起動のたびに変わります。</string>
+	<string name="connect">接続する</string>
+	<string name="retry">再試行</string>
+	<string name="menu_host">接続先を変更</string>
+	<string name="menu_reload">再読み込み</string>
+	<string name="menu_state">同期状態</string>
+	<string name="menu_share">接続先を共有</string>
+	<string name="menu_reset">ペアリングをやり直す</string>
+	<string name="menu_about">DSH Mobile について</string>
+	<string name="error_title">ホストに接続できません</string>
+</resources>

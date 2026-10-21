@@ -1,0 +1,6 @@
+{
+  "name": "dsh-mobile-vendor",
+  "private": true,
+  "type": "commonjs",
+  "description": "Vendored third-party code. The CommonJS marker keeps the UMD build of qrcode-generator loadable with require() from this ES module package."
+}
