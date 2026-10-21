@@ -39,7 +39,9 @@ jobs:
         run: |
           apk="android/app/build/outputs/apk/release/app-release.apk"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "$apk" --clobber
+            # A release that was published from a signed local build keeps
+            # its own APK; the CI build is only a fallback.
+            echo "The release ${GITHUB_REF_NAME} already exists, keeping it."
           else
             gh release create "${GITHUB_REF_NAME}" "$apk" \
               --title "DSH Mobile ${GITHUB_REF_NAME}" \
