@@ -1,17 +1,19 @@
 # LAN exposure overlay for the shared DSH Web host.
 #
 # The webserver row's whole config is restated here: a patch replaces the
-# targeted row's config rather than merging into it.
+# row, so every key it needs is present again.
 #
-# host 0.0.0.0 binds every local interface. The CLI refuses `--host 0.0.0.0`
-# on the command line, but the profile patch layer is the supported override
-# mechanism, and the webserver's own schema accepts the wildcard. The trust
-# fence derives its LAN authorities from the active bind (resolveLanTrust), so
-# the concrete IPv4 addresses of this machine become trusted hosts and the
-# phone's Host header is admitted.
+# dsh 0.2.1 以降の webserver はワイルドカード (0.0.0.0) を拒否し、
+# ローカルの具体的な IPv4 アドレスを 1 つだけ bind することを求める
+# (全インターフェースへの公開は RCE をネットワークに晒すため)。
+# そのため dsh-mobile.ps1 は既定経路を持つ NIC の IPv4 を検出して
+# DSH_MOBILE_BIND へ渡す。ここに 0.0.0.0 を書いても 0.2.1 では起動しない。
+# The trust fence derives its LAN authorities from the active bind
+# (resolveLanTrust), so the concrete IPv4 address of this machine becomes a
+# trusted host and the phone's Host header is admitted.
 - id: webserver
   config:
-    host: !!js process.env.DSH_MOBILE_BIND ?? '0.0.0.0'
+    host: !!js process.env.DSH_MOBILE_BIND ?? '127.0.0.1'
     port: !!js Number(process.env.DSH_MOBILE_PORT ?? 3080)
     compression: gzip
     compressionLevel: 1

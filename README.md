@@ -62,7 +62,7 @@ DSH プロファイルに読み込みます。`web` プロファイルには導�
 C:\root\dsh-mobile\dsh-mobile.ps1 start
 ```
 
-- ホストを `0.0.0.0:3080`（LAN 公開）で起動します
+- ホストを **LAN の IPv4:3080**（LAN 公開）で起動します
 - 起動後に **ペアリングカード**（PIN・URL・QR）が端末に出力されます
 - カードと引き換え用のファイルは `C:\Users\tatud\.dsh\mobile-pair.json` に
   書き出されます（`DSH_HOME` 配下。トークンを含むため他人に見せないこと）
@@ -88,9 +88,42 @@ dsh-mobile:   PIN page http://192.168.0.166:3080/mobile
 dsh --profile web --patch C:\root\dsh-mobile\lan.patch.yml --no-open
 ```
 
-> `dsh web --host 0.0.0.0` は「ネットワークに RCE を公開する」理由から
-> CLI が拒否します。スキーマ上は `0.0.0.0` が許されるため、**パッチ層で
-> `host` を指定**して回避しています（`lan.patch.yml`）。
+> dsh 0.2.1 以降、`0.0.0.0`（ワイルドカード）への bind は
+> **webserver プラグインが起動時に拒否**します（理由も同上: ネットワークに
+> RCE を公開するため）。そのため `lan.patch.yml` では `host` に
+> **具体的な LAN の IPv4 アドレス**を入れます。
+> `dsh-mobile.ps1 start` は既定経路を持つ NIC の IPv4 を自動検出して
+> `DSH_MOBILE_BIND` に渡すので、DHCP で IP が変わっても起動し直せば済みます。
+> なお CLI とデスクトップアプリの dsh の**バージョンが違うと**、
+> セッションログのイベント型を解釈できず「履歴の読み込みに失敗」になります
+> （§3.1.1）。
+
+### 3.1.1 CLI とデスクトップアプリ dsh のバージョン一致（必須）
+
+スマホ/Web 側のホスト（`dsh web`）と、デスクトップアプリとで **dsh のバージョンが
+違うと**、デスクトップアプリが書いたセッションログを Web 側が読めません。
+Web 側は新しい型のイベント（例: `job/registered`）を解釈できないまま
+「そのログは新しい harness が書いた可能性が高い」と判断し、**履歴の読み込みを
+拒否**します。チャット画面には次のようなエラーが出ます。
+
+```
+履歴の読み込みに失敗しました: failed to observe session "session-...":
+session "session-..." contains event type "job/registered" (seq 20) unknown to
+this harness and not marked ignorable; refusing to interpret the log
+（gateway/internal）
+```
+
+**対処: CLI をデスクトップアプリと同じ版に更新します。**
+
+```powershell
+npm install -g @deepseek-ai/dsh@<デスクトップアプリと同じバージョン>
+dsh --version   # デスクトップアプリの version と一致していることを確認
+```
+
+デスクトップアプリの dsh バージョンは、アプリの同梱パッケージから確認できます
+（`resources/app.asar\dsh\package.json` の `version`）。
+`dsh-mobile.ps1 start` は起動時に CLI とデスクトップアプリの版を突き合わせ、
+違う場合は警告を表示します。
 
 ### 3.2 スマホをペアリングする
 
@@ -131,9 +164,10 @@ LAN に公開する以上、認証は最後の防御線です。以下の点を�
 - **平文 HTTP**: このビルドは TLS を持たないため、LAN 上のトークンと
   cookie は **平文** で流れます。信頼できる Wi-Fi でのみ使うか、
   `tailscale serve` などで HTTPS を前段に置いてください。
-- **公開の判断**: `0.0.0.0` へのバインドは **意図的な信頼の決定** です。
+- **公開の判断**: LAN のアドレスへのバインドは **意図的な信頼の決定** です。
   自宅や自宅内 LAN 以外では使わないでください。公開が必要な場合は
   `-Bind 127.0.0.1` にして、Tailscale など安全な経路だけを公開してください。
+  （dsh 0.2.1 以降、`0.0.0.0` へのワイルドカード bind は webserver が拒否します）
 - `mobile-pair.json` は**トークンを含む**ため、`$DSH_HOME` 内の他ファイル
   と同じ扱いで保管してください（POSIX では 0600 で書き込みます）。
 
@@ -170,7 +204,8 @@ C:\root\dsh-mobile\
   assets/icon.svg       アイコン（PNG 3 種は SVG から生成済み）
   vendor/qrcode.js      qrcode-generator 2.0.4（MIT, Kazuhiko Arase）
   cordis.patch.yml      束への行挿入
-  lan.patch.yml         webserver 行を 0.0.0.0 に差し替えるオーバーレイ
+  lan.patch.yml         webserver 行を LAN の IPv4 に差し替えるオーバーレイ
+  tools/                診断ツール（履歴/セッション追跡、APK 解析、UI 操作）
   dsh-mobile.ps1        起動・停止・状態表示
   android/              ネイティブ Android アプリ（WebView シェル）
   docs/phone.png        Android 端末で動かしたときの画面
@@ -199,6 +234,16 @@ node tools\outbox-probe.mjs "http://192.168.0.166:3080/?token=…"  # オフラ�
 node tools\ui-probe.mjs    "http://127.0.0.1:3080/?token=…" "http://192.168.0.166:3080/mobile"
 node tools\pair-probe.mjs  "http://192.168.0.166:3080/?token=…" "http://192.168.0.166:3080/mobile"
 node tools\composer-probe.mjs "http://192.168.0.166:3080/?token=…"  # 入力欄の編集可否
+node tools\history-probe.mjs "http://192.168.0.166:3080"             # セッション一覧/履歴の読み込み
+node tools\follow-probe.mjs "<sessionId>" "http://192.168.0.166:3080" # 特定セッションのスナップショット
+```
+
+`tools\ui.ps1` は Android エミュレータの画面を操作します（`tap` / `type` / `dump`）。
+
+```powershell
+pwsh -NoProfile -File tools\ui.ps1 tap "接続する"
+pwsh -NoProfile -File tools\ui.ps1 type "180585"
+pwsh -NoProfile -File tools\ui.ps1 dump
 ```
 
 実測結果（スマホビューポート）:
@@ -282,6 +327,9 @@ GitHub のリリースに APK を添付してあるので、スマホのブラ�
 
 ## 10. 既知の制限
 
+- **CLI の dsh はデスクトップアプリと同じバージョンにしてください。**
+  違うとセッションログのイベント型を解釈できず「履歴の読み込みに失敗」
+  になります（§3.1.1）。`dsh-mobile.ps1 start` が警告を表示します。
 - **平文 HTTP ではサービスワーカーが使えません**（secure context 必須）。
   オフラインシェルは `https://` または `localhost` でのみ有効です。
   iOS の「ホーム画面に追加」自体は HTTP でも可能です。

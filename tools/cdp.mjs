@@ -58,6 +58,13 @@ class Page {
 		});
 	}
 
+	/** Listen to a page event for as long as the page lives. */
+	on(method, listener) {
+		const listeners = this.events.get(method) ?? [];
+		listeners.push(listener);
+		this.events.set(method, listeners);
+	}
+
 	/** Wait for one page event. */
 	once(method, timeoutMs = 20_000) {
 		return new Promise((resolve, reject) => {

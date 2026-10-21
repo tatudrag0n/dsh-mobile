@@ -32,7 +32,7 @@ param(
 	[string]$Action = 'start',
 	[ValidateRange(0, 65535)]
 	[int]$Port = 3080,
-	[string]$Bind = '0.0.0.0',
+	[string]$Bind = '',
 	[string]$Profile = 'web'
 )
 
@@ -43,10 +43,12 @@ $Log = Join-Path $Root 'host.log'
 $PairFile = Join-Path ($env:DSH_HOME ?? (Join-Path $env:USERPROFILE '.dsh')) 'mobile-pair.json'
 
 function Get-HostProcess {
-	$connection = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
-		Where-Object { $_.LocalAddress -eq $Bind -or $Bind -eq '0.0.0.0' } |
-		Select-Object -First 1
-	if ($null -eq $connection) { return $null }
+	$connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
+		Where-Object { $_.OwningProcess -gt 0 })
+	if ($connections.Count -eq 0) { return $null }
+	# バインドしたアドレスを優先し、DHCP で IP が変わっていても拾えるようにする。
+	$connection = $connections | Where-Object { $_.LocalAddress -eq $Bind } | Select-Object -First 1
+	if ($null -eq $connection) { $connection = $connections[0] }
 	return Get-Process -Id $connection.OwningProcess -ErrorAction SilentlyContinue
 }
 
@@ -58,6 +60,57 @@ function Show-PairingCard {
 	& node (Join-Path $Root 'tools\show-pair.mjs') $PairFile
 }
 
+function Get-LanAddress {
+	# dsh 0.2.1 以降の webserver はワイルドカード (0.0.0.0) を拒否し、
+	# ローカルの具体的な IPv4 アドレスを 1 つだけ，要求する。
+	# 既定経路を持つ NIC を優先し、APIPA (169.254.x) は LAN 宛先として使わない。
+	$route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+		Sort-Object RouteMetric |
+		Where-Object { $_.InterfaceAlias -notmatch 'Loopback|Tailscale|WSL|VMware|VirtualBox|Hyper-V' } |
+		Select-Object -First 1
+	if (-not $route) { return '127.0.0.1' }
+	$address = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+		Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } |
+		Select-Object -First 1
+	if ($address) { return $address.IPAddress }
+	return '127.0.0.1'
+}
+
+function Get-DesktopDshVersion {
+	# デスクトップアプリが同梱する dsh のバージョン。
+	# app.asar は Electron 専用だが、ヘッダの JSON だけ読むので素の Node/PowerShell で十分。
+	$asar = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\app.asar"
+	if (-not (Test-Path $asar)) { return $null }
+	try {
+		$bytes = [System.IO.File]::ReadAllBytes($asar)
+		$headerSize = [BitConverter]::ToUInt32($bytes, 4)
+		$jsonSize = [BitConverter]::ToUInt32($bytes, 12)
+		$header = [Text.Encoding]::UTF8.GetString($bytes, 16, $jsonSize) | ConvertFrom-Json
+		$entry = $header.files.dsh.files.'package.json'
+		$dataStart = 8 + $headerSize
+		$json = [Text.Encoding]::UTF8.GetString($bytes, $dataStart + [int]$entry.offset, $entry.size) | ConvertFrom-Json
+		return $json.version
+	} catch {
+		return $null
+	}
+}
+
+function Test-VersionParity {
+	# CLI とデスクトップアプリの dsh が違うと、セッションログのイベント型が
+	# 解釈できず「履歴の読み込みに失敗」になる。起動時に警告する。
+	$cli = $null
+	try { $cli = (& dsh --version 2>$null | Select-Object -First 1).ToString().Trim() } catch { $cli = $null }
+	$desktop = Get-DesktopDshVersion
+	if (-not $cli -or -not $desktop) { return }
+	if ($cli -eq $desktop) { return }
+	Write-Host "dsh-mobile: 警告: CLI の dsh ($cli) とデスクトップアプリの dsh ($desktop) が異なります。" -ForegroundColor Yellow
+	Write-Host "             セッションログのイベント型が解釈できず「履歴の読み込みに失敗」になります。" -ForegroundColor Yellow
+	Write-Host "             npm install -g @deepseek-ai/dsh@$desktop" -ForegroundColor Yellow
+}
+
+# バインドアドレスは start 以外（status/stop）でも同じ解決結果を使う。
+if (-not $Bind) { $Bind = Get-LanAddress }
+
 switch ($Action) {
 	'start' {
 		if ($null -ne (Get-HostProcess)) {
@@ -65,13 +118,16 @@ switch ($Action) {
 			Show-PairingCard
 			break
 		}
+		if (-not $Bind) { $Bind = Get-LanAddress }
 		$env:DSH_MOBILE_BIND = $Bind
+
 		$env:DSH_MOBILE_PORT = "$Port"
 		Write-Host "dsh-mobile: ホストを起動します (bind=$Bind port=$Port profile=$Profile)" -ForegroundColor Cyan
 		# `dsh` is installed as a PowerShell script on Windows, so it is run
 		# through pwsh rather than executed directly.
 		$command = Get-Command dsh -ErrorAction SilentlyContinue
 		if ($null -eq $command) { throw "dsh-mobile: `dsh` が見つかりません" }
+		Test-VersionParity
 		$arguments = @('-NoProfile', '-File', $command.Source, '--profile', $Profile, '--patch', $Patch, '--no-open')
 		$process = Start-Process -FilePath 'pwsh' `
 			-ArgumentList $arguments `
