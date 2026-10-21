@@ -31,7 +31,7 @@ export const MANIFEST = {
  * carry a content hash in their file name, so they are cached forever. The
  * `/api` prefix is never touched: the Host is the source of truth for state.
  */
-export const SERVICE_WORKER = `const CACHE = 'dsh-mobile-v1';
+export const SERVICE_WORKER = `const CACHE = 'dsh-mobile-v1-__DSH_MOBILE_VERSION__';
 const OFFLINE = '/mobile/offline.html';
 
 self.addEventListener('install', (event) => {

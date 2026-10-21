@@ -21,6 +21,7 @@
  * for a while. The launch URL is the process's one-shot token, so the phone
  * trades it for a signed cookie that lasts `cookieMaxAgeDays` (30 by default).
  */
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -47,6 +48,31 @@ export const inject = ["webServer", "connection"];
  * @param request - the incoming request.
  * @returns the body text.
  */
+/**
+ * The service worker source, with a cache name that changes whenever the
+ * client assets change.
+ *
+ * The worker caches the app shell cache-first, so a fixed cache name would
+ * keep serving an outdated client.js to the phone forever. Hashing the
+ * client assets into the cache name makes the browser install a new worker
+ * (and drop the old cache) as soon as the plugin changes.
+ *
+ * @returns the service worker source.
+ */
+function serviceWorkerSource() {
+	let version = "0";
+	try {
+		const hash = createHash("sha256");
+		for (const file of ["client.js", "assets/pages.js"]) {
+			hash.update(readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url))));
+		}
+		version = hash.digest("hex").slice(0, 12);
+	} catch {
+		// Fall back to a fixed version; the worker still works, just not versioned.
+	}
+	return SERVICE_WORKER.replace("__DSH_MOBILE_VERSION__", version);
+}
+
 async function readBody(request) {
 	const chunks = [];
 	for await (const chunk of request) chunks.push(chunk);
@@ -334,7 +360,7 @@ export function apply(ctx, config) {
 		kind: "exact",
 		path: "/sw.js",
 		handler: (request, response) => {
-			sendText(response, 200, "text/javascript; charset=utf-8", SERVICE_WORKER);
+			sendText(response, 200, "text/javascript; charset=utf-8", serviceWorkerSource());
 		},
 	}), "dsh-mobile: service worker");
 

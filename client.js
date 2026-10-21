@@ -689,6 +689,124 @@ body {
 			};
 		}
 
+		/**
+		 * ホストが開いているセッションが空（blank）なら、PC で実際に話している
+		 * 最新のセッションへ自動で追従する。スマホ版 DSH が「PC の画面Continuation」を
+		 * なぞるためのもので、イベント履歴がないセッションのままだと
+		 * 「履歴が読み込めない」ように見えるため。
+		 *
+		 * @param ctx - the client context.
+		 * @param services - the optional session services.
+		 */
+		/**
+		 * ホストが開いているセッションが空（blank）なら、PC で実際に話している
+		 * 最新のセッションへ自動で追従する。スマホ版 DSH が「PC と同じ画面」を
+		 * なぞるためのもので、イベント履歴がないセッションのままだと
+		 * 「履歴が読み込めない」ように見えるため。
+		 *
+		 * @param ctx - the client context.
+		 * @param services - the session services.
+		 */
+		/**
+		 * ホストが開いているセッションが空（blank）なら、PC で実際に話している
+		 * 最新のセッションへ自動で追従する。スマホ版 DSH が「PC と同じ画面」を
+		 * なぞるためのもので、イベント履歴がないセッションのままだと
+		 * 「履歴が読み込めない」ように見えるため。
+		 *
+		 * @param ctx - the client context.
+		 * @param services - the session services.
+		 */
+		/**
+		 * ホストが開いているセッションが空（blank）なら、PC で実際に話している
+		 * 最新のセッションへ自動で追従する。
+		 *
+		 * スマホ版 DSH は「PC でいま話している会話」をそのまま追いかけたかった。
+		 * ホストは自分の空セッションを復元するため、起動直後は必ず履歴のない
+		 * セッションが開く。ここではその空セッションを置き換え、意思のある
+		 * 会話（blank でない最新のセッション）へ移動する。ユーザーが既に
+		 * 入力を始めたセッションは blank ではないので触らない。
+		 *
+		 * @param ctx - the client context.
+		 * @param services - the session services.
+		 */
+		async function installSessionMirror(ctx, services) {
+			const currentId = () => {
+				try {
+					return services.uiSession?.current?.value?.key;
+				} catch {
+					return undefined;
+				}
+			};
+			const storeRows = () => {
+				try {
+					return services.sessions?.list?.getSnapshot()?.byId ?? {};
+				} catch {
+					return {};
+				}
+			};
+			const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+			const listSessions = async () => {
+				const response = await fetch("/api/session/list", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						type: "client-request",
+						rpcId: `dsh-mobile-${Date.now()}`,
+						method: "session/list",
+						payload: { args: { _request: {} } },
+					}),
+				});
+				if (!response.ok) throw new Error(`session/list failed: ${response.status}`);
+				const payload = await response.json();
+				return payload?.result?.value?.items ?? [];
+			};
+			// クライアントの起動処理（空セッションの復元など）が落ち着くのを待つ。
+			await sleep(3000);
+			for (let attempt = 1; attempt <= 20; attempt += 1) {
+				const id = currentId();
+				if (id === undefined) {
+					await sleep(1000);
+					continue;
+				}
+				let items = [];
+				try {
+					items = await listSessions();
+				} catch {
+					await sleep(1000);
+					continue;
+				}
+				const current = items.find((item) => item.sessionId === id);
+				if (current === undefined) {
+					await sleep(1000);
+					continue;
+				}
+				// 既に会話済みのセッションを開いているならそのままにする。
+				if (current.blank !== true) return;
+				const target = items
+					.filter((item) => item.blank !== true && item.updatedAt > current.updatedAt)
+					.sort((left, right) => right.updatedAt - left.updatedAt)[0];
+				if (target === undefined) return;
+				// クライアントのセッション一覧に載るまで待つ。
+				if (!Object.hasOwn(storeRows(), target.sessionId)) {
+					await sleep(1000);
+					continue;
+				}
+				try {
+					services.uiWorkspace?.openSession(target.sessionId);
+				} catch (error) {
+					console.warn("dsh-mobile: 最新セッションへの追従に失敗しました", error);
+					await sleep(1000);
+					continue;
+				}
+				// 実際に切り替わったかを確認する（起動処理に追い越されることがある）。
+				for (let wait = 0; wait < 12; wait += 1) {
+					await sleep(500);
+					if (currentId() === target.sessionId) return;
+				}
+			}
+		}
+
+
 		return {
 			inject: ["connection"],
 			/**
@@ -699,10 +817,11 @@ body {
 				const state = () => ctx.connection.state.getSnapshot() ?? "disconnected";
 				// The session services are optional: without them the outbox can
 				// still use the composer's own send button.
-				const services = { sessions: undefined, uiSession: undefined };
-				ctx.effect(() => ctx.inject(["sessions", "uiSession"], (scope) => {
+				const services = { sessions: undefined, uiSession: undefined, uiWorkspace: undefined };
+				ctx.effect(() => ctx.inject(["sessions", "uiSession", "uiWorkspace"], (scope) => {
 					services.sessions = scope.get("sessions");
 					services.uiSession = scope.get("uiSession");
+					services.uiWorkspace = scope.get("uiWorkspace");
 				}), "dsh-mobile: session services");
 				const outbox = createOutbox(services);
 				ctx.effect(() => installStyles(), "dsh-mobile: styles");
@@ -713,6 +832,7 @@ body {
 				ctx.effect(() => installOutbox(outbox, state), "dsh-mobile: outbox");
 				ctx.effect(() => installStatus(ctx, outbox, state), "dsh-mobile: sync status");
 				ctx.effect(() => installInstallHint(), "dsh-mobile: install hint");
+				ctx.effect(() => installSessionMirror(ctx, services), "dsh-mobile: session mirror");
 				// A native wrapper (the Android app) has no access to the client
 				// context, so the state is readable from the page as well.
 				ctx.effect(() => {
