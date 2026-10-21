@@ -128,17 +128,29 @@ switch ($Action) {
 		$command = Get-Command dsh -ErrorAction SilentlyContinue
 		if ($null -eq $command) { throw "dsh-mobile: `dsh` が見つかりません" }
 		Test-VersionParity
-		$arguments = @('-NoProfile', '-File', $command.Source, '--profile', $Profile, '--patch', $Patch, '--no-open')
-		$process = Start-Process -FilePath 'pwsh' `
-			-ArgumentList $arguments `
-			-WorkingDirectory $Root -WindowStyle Hidden -PassThru `
-			-RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
+		$runner = Join-Path $Root 'scripts\run-host.ps1'
+		$runnerArguments = @(
+			'-NoProfile', '-WindowStyle', 'Hidden', '-File', $runner,
+			'-Profile', $Profile, '-Patch', $Patch, '-Log', $Log
+		)
+		$process = $null
+		try {
+			# Explorer 経由で起動すると、起動元のシェルやセッションを閉じても
+			# ホストは動き続ける（親プロセスに依存しない）。
+			$shell = New-Object -ComObject Shell.Application
+			$shell.ShellExecute('pwsh', ($runnerArguments -join ' '), $Root, 'open', 0) | Out-Null
+		} catch {
+			Write-Warning 'Explorer 経由で起動できなかったため、子プロセスとして起動します。'
+			$process = Start-Process -FilePath 'pwsh' `
+				-ArgumentList $runnerArguments `
+				-WorkingDirectory $Root -WindowStyle Hidden -PassThru
+		}
 		Start-Sleep -Seconds 2
 		# The Host needs a while to boot, and the pairing card is only written
 		# once the listener is up: wait for the port before reading it.
 		$ready = $false
 		for ($attempt = 0; $attempt -lt 90; $attempt++) {
-			if ($process.HasExited) { break }
+			if ($null -ne $process -and $process.HasExited) { break }
 			$listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue
 			if ($null -ne $listener) { $ready = $true; break }
 			Start-Sleep -Seconds 1

@@ -13,4 +13,6 @@
 	<string name="menu_reset">ペアリングをやり直す</string>
 	<string name="menu_about">DSH Mobile について</string>
 	<string name="error_title">ホストに接続できません</string>
+  <string name="repair">再ペアリング</string>
+  <string name="error_auth">ホストの認証が失効しました。\nPIN を入力して再ペアリングしてください。</string>
 </resources>

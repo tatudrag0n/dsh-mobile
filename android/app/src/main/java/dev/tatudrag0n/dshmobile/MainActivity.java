@@ -20,6 +20,7 @@ import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -63,6 +64,7 @@ public class MainActivity extends Activity {
 	private TextView hostLabel;
 	private View setup;
 	private View error;
+	private String pendingError;
 	private TextView errorText;
 	private EditText hostInput;
 	private EditText pairPathInput;
@@ -177,7 +179,11 @@ public class MainActivity extends Activity {
 			@Override
 			public void onPageFinished(WebView view, String url) {
 				super.onPageFinished(view, url);
-				hideError();
+				if (pendingError == null) {
+					hideError();
+				} else {
+					showError(pendingError);
+				}
 				Uri uri = Uri.parse(url);
 				// Leaving the pairing page means the PIN was accepted and the
 				// Host handed out its session cookie.
@@ -191,7 +197,26 @@ public class MainActivity extends Activity {
 				super.onReceivedError(view, request, error);
 				if (!request.isForMainFrame()) return;
 				String description = error.getDescription() == null ? "" : error.getDescription().toString();
+				pendingError = description;
 				showError(description);
+			}
+			/**
+			 * The host rejected the session (the token rotated after a restart).
+			 * The DSH app answers with 401, so the phone would only show an empty
+			 * page. Point the user at the pairing page instead.
+			 * @param view - the web view.
+			 * @param request - the request that failed.
+			 * @param response - the response that failed.
+			 */
+			@Override
+			public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+				super.onReceivedHttpError(view, request, response);
+				if (!request.isForMainFrame()) return;
+				int status = response.getStatusCode();
+				if (status != 401 && status != 403) return;
+				if (isPairingUrl(request.getUrl().toString())) return;
+				pendingError = getString(R.string.error_auth);
+				showError(pendingError);
 			}
 		});
 
@@ -320,6 +345,14 @@ public class MainActivity extends Activity {
 			openHost(currentHost(), currentPairPath(), false);
 		});
 		panel.addView(retry);
+		Button rePair = new Button(this);
+		rePair.setText(R.string.repair);
+		rePair.setTextColor(getColor(R.color.dsh_text));
+		rePair.setOnClickListener(view -> {
+			hideError();
+			openHost(currentHost(), currentPairPath(), true);
+		});
+		panel.addView(rePair);
 
 		error = panel;
 		return panel;
@@ -347,6 +380,7 @@ public class MainActivity extends Activity {
 	 */
 	private void openHost(String host, String pairPath, boolean pairing) {
 		hostLabel.setText(host);
+		pendingError = null;
 		hideError();
 		if (setup != null) setup.setVisibility(View.GONE);
 		String target = pairing ? host + pairPath : host + "/";
