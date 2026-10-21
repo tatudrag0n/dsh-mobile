@@ -173,6 +173,7 @@ C:\root\dsh-mobile\
   lan.patch.yml         webserver 行を 0.0.0.0 に差し替えるオーバーレイ
   dsh-mobile.ps1        起動・停止・状態表示
   android/              ネイティブ Android アプリ（WebView シェル）
+  docs/phone.png        Android 端末で動かしたときの画面
   test/                 node:test による単体・結合テスト
   tools/                実機 Chrome を操作する検証スクリプト（下記）
 ```
@@ -212,13 +213,32 @@ node tools\composer-probe.mjs "http://192.168.0.166:3080/?token=…"  # 入力�
 
 `android/` には、同じ DSH ホストをスマホから使うための **ネイティブ Android
 アプリ**があります。ブラウザ版と同じ Web UI を WebView で表示するだけで、
-dependency はゼロ（APK 約 35 KB）です。
+dependency はゼロ（APK 約 29 KB）です。
+
+![DSH Mobile を実行中の Android 端末](docs/phone.png)
 
 - 初回起動時に **接続先**（例 `192.168.0.166:3080`）を入力
 - そのまま **ペアリングページ**が開くので、PC に出ている PIN を入力
 - 以降は cookie だけで自動接続（トークンなしでホストのルートを開く）
 - 同期状態はメニューから確認でき、未送信メッセージは画面内で確認できる
 - ファイル選択・マイク（音声入力）に対応
+
+### 動作確認
+
+Android エミュレーター（API 35, x86_64）で実際に apk を起動して確認しました。
+
+1. 接続先を入力して「接続する」→ PC の **ペアリングページ** が WebView に開く
+2. PC に出ている 6 桁の PIN を入力 → 起動 URL が表示され「DSH を開く」で本体へ
+3. 本体が開き、**PC と同じセッション**（`Into the Unknown`）が一覧に出る
+4. アプリを強制終了して開き直しても、**トークンなしでルートへ直行**して
+   再接続する（cookie が Android の WebView に残るため）
+
+WebView の中の実際の状態は DevTools プロトコルで読み取れます。
+
+```powershell
+node tools\webview-cdp.mjs "JSON.stringify(window.__DSH_MOBILE_STATE__())"
+# => {"state":"connected","pending":0}
+```
 
 ### ビルド
 
@@ -241,6 +261,11 @@ debug キーで署名されるため、そのまま端末へサイドロード�
 keytool -genkeypair -v -keystore android\dsh-mobile.keystore `
   -alias dsh-mobile -keyalg RSA -keysize 2048 -validity 10000
 ```
+
+このプロジェクトで使っている keystore のパスワードは `dsh-mobile` です
+（alias も同じ）。**keystore ファイルはリポジトリに含めていません**。
+別の keystore を使う場合は `DSH_MOBILE_KEYSTORE_PASSWORD` /
+`DSH_MOBILE_KEY_ALIAS` / `DSH_MOBILE_KEY_PASSWORD` を環境変数で渡します。
 
 署名を更新するときは、同じキーで署名しなおさないと、既存のインストールは
 更新できません（別キーになると再インストールが必要になります）。
