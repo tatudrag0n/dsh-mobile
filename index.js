@@ -22,7 +22,7 @@
  * trades it for a signed cookie that lasts `cookieMaxAgeDays` (30 by default).
  */
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -153,7 +153,9 @@ export function apply(ctx, config) {
 	async function writeCard() {
 		const target = join(dshHome(), PAIR_FILE);
 		try {
-			await writeFile(target, `${JSON.stringify(card(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+			const temporary = `${target}.tmp`;
+			await writeFile(temporary, `${JSON.stringify(card(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+			await rename(temporary, target);
 		} catch (error) {
 			ctx.logger.warn(`dsh-mobile: cannot write ${target}: ${error instanceof Error ? error.message : String(error)}`);
 		}

@@ -29,6 +29,12 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+$port = [int]($env:DSH_MOBILE_PORT ?? 3080)
+$listener = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue
+if ($null -ne $listener) {
+	# Another host already owns the port; there is nothing to start.
+	exit 0
+}
 $command = Get-Command dsh -ErrorAction SilentlyContinue
 if ($null -eq $command) {
 	Write-Error 'dsh が見つかりません（npm install -g @deepseek-ai/dsh）。'

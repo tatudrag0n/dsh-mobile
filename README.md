@@ -62,6 +62,10 @@ DSH プロファイルに読み込みます。`web` プロファイルには導�
 セッションを閉じてもホストは動き続けます（スマホとの同期は切れません）。
 停止するには `dsh-mobile.ps1 stop` を実行してください。
 
+再起動（PC の再起動など）の後もホストを起動したい場合は **`.\dsh-mobile.ps1 install`**
+を実行してください。Windows の自動起動（ログイン時の起動項目）に登録され、ログイン
+するたびにホストが立ち上がります。解除は `.\dsh-mobile.ps1 uninstall` です。
+
 ```powershell
 C:\root\dsh-mobile\dsh-mobile.ps1 start
 ```
@@ -82,6 +86,8 @@ dsh-mobile:   PIN page http://192.168.0.166:3080/mobile
 
 ```powershell
 .\dsh-mobile.ps1 status    # 起動状況とペアリングカード
+.\dsh-mobile.ps1 install   # Windows の自動起動（ログイン時にホストを起動）
+.\dsh-mobile.ps1 uninstall # 自動起動を解除
 .\dsh-mobile.ps1 stop      # 停止
 .\dsh-mobile.ps1 restart   # 再起動（PIN とトークンが更新されます）
 ```
@@ -369,3 +375,5 @@ GitHub のリリースに APK を添付してあるので、スマホのブラ�
 - ホストは `dsh-mobile.ps1 start` で起動します。この起動は** Explorer 経由の
   独立プロセス**なので、起動したターミナルやセッションを閉じてもホストは動き
   続けます（`dsh-mobile.ps1 stop` で停止します）。
+- PC を再起動した場合は、`.\dsh-mobile.ps1 install` で自動起動を設定しておくと
+  ログイン直後にホストが戻ります（未設定の場合は `start` が必要です）。

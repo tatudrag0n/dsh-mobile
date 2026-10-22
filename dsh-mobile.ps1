@@ -28,7 +28,7 @@
 #>
 [CmdletBinding()]
 param(
-	[ValidateSet('start', 'stop', 'status', 'restart')]
+	[ValidateSet('start', 'stop', 'status', 'restart', 'install', 'uninstall')]
 	[string]$Action = 'start',
 	[ValidateRange(0, 65535)]
 	[int]$Port = 3080,
@@ -111,7 +111,32 @@ function Test-VersionParity {
 # バインドアドレスは start 以外（status/stop）でも同じ解決結果を使う。
 if (-not $Bind) { $Bind = Get-LanAddress }
 
+# The Startup folder entry that brings the host back after a reboot.
+function Get-AutostartPath {
+	Join-Path ([Environment]::GetFolderPath('Startup')) 'dsh-mobile-host.cmd'
+}
+
+function Install-Autostart {
+	$path = Get-AutostartPath
+	$runner = Join-Path $Root 'scripts\run-host.ps1'
+	$line = 'pwsh -NoProfile -WindowStyle Hidden -File "{0}" -Profile {1} -Patch "{2}" -Log "{3}"' -f $runner, $Profile, $Patch, $Log
+	Set-Content -Path $path -Value @('@echo off', $line) -Encoding utf8
+	Write-Host "dsh-mobile: 自動起動を設定しました ($path)" -ForegroundColor Green
+}
+
+function Uninstall-Autostart {
+	$path = Get-AutostartPath
+	if (Test-Path $path) { Remove-Item $path -Force }
+	Write-Host 'dsh-mobile: 自動起動を解除しました' -ForegroundColor Green
+}
+
 switch ($Action) {
+	'install' {
+		Install-Autostart
+	}
+	'uninstall' {
+		Uninstall-Autostart
+	}
 	'start' {
 		if ($null -ne (Get-HostProcess)) {
 			Write-Host "dsh-mobile: 既にポート $Port でホストが起動しています" -ForegroundColor Yellow
