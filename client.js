@@ -760,51 +760,102 @@ body {
 				const payload = await response.json();
 				return payload?.result?.value?.items ?? [];
 			};
-			// クライアントの起動処理（空セッションの復元など）が落ち着くのを待つ。
-			await sleep(3000);
-			for (let attempt = 1; attempt <= 20; attempt += 1) {
-				const id = currentId();
-				if (id === undefined) {
-					await sleep(1000);
-					continue;
-				}
-				let items = [];
-				try {
-					items = await listSessions();
-				} catch {
-					await sleep(1000);
-					continue;
-				}
-				const current = items.find((item) => item.sessionId === id);
+
+			// The phone is a peer, not a mirror: it may open its own independent
+			// sessions. We only nudge it onto a real conversation on the very
+			// first load (so it does not sit on the host's empty restored
+			// session), and we stop the moment the user takes control.
+			if (window.__DSH_MOBILE_MIRROR_DONE__) return;
+			window.__DSH_MOBILE_MIRROR_DONE__ = true;
+
+			let userInteracted = false;
+			const markInteracted = () => { userInteracted = true; };
+			document.addEventListener("click", markInteracted, { capture: true, once: true });
+			document.addEventListener("keydown", markInteracted, { capture: true, once: true });
+
+			const initialId = currentId();
+
+			await sleep(2000);
+
+			for (let attempt = 0; attempt < 15 && !userInteracted; attempt += 1) {
+				const nowId = currentId();
+				// The user navigated to (or created) their own session: leave it alone.
+				if (nowId !== initialId) return;
+
+				const rows = storeRows();
+				const current = nowId !== undefined ? rows[nowId] : undefined;
 				if (current === undefined) {
 					await sleep(1000);
 					continue;
 				}
-				// 既に会話済みのセッションを開いているならそのままにする。
+				// Already on a real conversation (the user's or the PC's): nothing to do.
 				if (current.blank !== true) return;
-				const target = items
-					.filter((item) => item.blank !== true && item.updatedAt > current.updatedAt)
-					.sort((left, right) => right.updatedAt - left.updatedAt)[0];
-				if (target === undefined) return;
-				// クライアントのセッション一覧に載るまで待つ。
-				if (!Object.hasOwn(storeRows(), target.sessionId)) {
-					await sleep(1000);
-					continue;
-				}
+
+				let items = [];
 				try {
-					services.uiWorkspace?.openSession(target.sessionId);
+					items = await listSessions();
 				} catch (error) {
 					console.warn("dsh-mobile: 最新セッションへの追従に失敗しました", error);
 					await sleep(1000);
 					continue;
 				}
-				// 実際に切り替わったかを確認する（起動処理に追い越されることがある）。
-				for (let wait = 0; wait < 12; wait += 1) {
-					await sleep(500);
-					if (currentId() === target.sessionId) return;
+
+				const target = items
+					.filter((item) => item.blank !== true)
+					.sort((left, right) => right.updatedAt - left.updatedAt)[0];
+				if (target === undefined) return;
+
+				if (!Object.hasOwn(storeRows(), target.sessionId)) {
+					await sleep(1000);
+					continue;
 				}
+
+				try {
+					await services.uiWorkspace?.openSession(target.sessionId);
+				} catch (error) {
+					console.warn("dsh-mobile: セッションを開けませんでした", error);
+					await sleep(1000);
+					continue;
+				}
+
+				// Confirm the switch actually landed (startup can race us).
+				for (let wait = 0; wait < 12 && !userInteracted; wait += 1) {
+					if (currentId() === target.sessionId) return;
+					await sleep(500);
+				}
+				return;
+			}
+
+			// Auto-sync: refresh the current session when the phone returns to the
+			// foreground or the link (re)connects, so new content from the PC shows
+			// up without a manual reload. Never interrupts a half-typed message.
+			const refreshCurrent = async () => {
+				if (userInteracted) return;
+				if (document.visibilityState !== "visible") return;
+				let state = "disconnected";
+				try { state = ctx.connection.state.getSnapshot() ?? "disconnected"; } catch {}
+				if (state !== "connected") return;
+				const id = currentId();
+				if (id === undefined) return;
+				const composer = document.querySelector('[data-composer-input]');
+				if (composer && String(composer.value ?? "").trim() !== "") return;
+				try {
+					await services.uiWorkspace?.openSession(id);
+				} catch (error) {
+					// Refresh is best-effort; ignore failures.
+				}
+			};
+
+			document.addEventListener("visibilitychange", () => {
+				if (document.visibilityState === "visible") void refreshCurrent();
+			});
+			try {
+				ctx.connection.state.subscribe(() => { void refreshCurrent(); });
+			} catch (error) {
+				// Connection state subscription is optional.
 			}
 		}
+
 
 
 		return {
