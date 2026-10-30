@@ -366,6 +366,28 @@ export function apply(ctx, config) {
 		},
 	}), "dsh-mobile: service worker");
 
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: `${options.pairPath}/sync`,
+		handler: async (request, response) => {
+			if (request.method === "GET") {
+				sendJson(response, 200, {
+					status: "ok",
+					deviceId: `host-${options.pairPath}`,
+					now: new Date().toISOString(),
+				});
+				return;
+			}
+			if (request.method === "POST") {
+				let body = {};
+				try { body = JSON.parse(await readBody(request)); } catch { body = {}; }
+				sendJson(response, 200, { status: "ok", received: true, from: body?.from ?? null });
+				return;
+			}
+			sendJson(response, 405, { status: "error", reason: "method" });
+		},
+	}), "dsh-mobile: sync endpoint");
+
 	// The client half reads this global: the pair path it offers, the LAN
 	// addresses to show, and whether this Host is reachable off the loopback.
 	ctx.on("webserver/index-inject", (table) => {
