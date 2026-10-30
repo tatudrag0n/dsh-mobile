@@ -7,6 +7,8 @@ import {
 	mergeEvents,
 	pluginDiff,
 	shouldSync,
+	validateSyncMessage,
+	mergePeers,
 } from "../lib/sync.js";
 
 test("isValidDeviceId rejects empty/blank", () => {
@@ -64,4 +66,27 @@ test("shouldSync gates", () => {
 	assert.equal(shouldSync({ paired: true, onWifi: true, foreground: false }), false);
 	assert.equal(shouldSync({ paired: true, onWifi: true, foreground: true }), true);
 	assert.equal(shouldSync({ paired: true, onWifi: true, foreground: false, manual: true }), true);
+});
+
+test("validateSyncMessage accepts valid messages", () => {
+	const msg = validateSyncMessage({ type: "events", from: "d1", sessionId: "s1", events: [{ id: "a" }] });
+	assert.equal(msg.type, "events");
+	assert.equal(msg.from, "d1");
+	assert.equal(msg.events.length, 1);
+});
+
+test("validateSyncMessage rejects bad messages", () => {
+	assert.equal(validateSyncMessage(null), null);
+	assert.equal(validateSyncMessage({ type: "unknown", from: "d1" }), null);
+	assert.equal(validateSyncMessage({ type: "events", from: "" }), null);
+});
+
+test("mergePeers dedups by deviceId", () => {
+	const merged = mergePeers(
+		[{ deviceId: "d1", seenAt: 10 }],
+		[{ deviceId: "d1", seenAt: 20 }, { deviceId: "d2", seenAt: 5 }]
+	);
+	assert.equal(merged.length, 2);
+	const d1 = merged.find((p) => p.deviceId === "d1");
+	assert.equal(d1.seenAt, 20);
 });
