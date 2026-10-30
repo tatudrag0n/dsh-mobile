@@ -7,6 +7,7 @@
 	<string name="connect">接続する</string>
 	<string name="retry">再試行</string>
 	<string name="menu_host">接続先を変更</string>
+	<string name="menu_local_host">ローカルホストを起動 (Termux)</string>
 	<string name="menu_reload">再読み込み</string>
 	<string name="menu_state">同期状態</string>
 	<string name="menu_share">接続先を共有</string>

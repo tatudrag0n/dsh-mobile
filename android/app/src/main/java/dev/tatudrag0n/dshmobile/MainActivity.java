@@ -410,6 +410,7 @@ public class MainActivity extends Activity {
 		menu.getMenu().add(0, 4, 3, R.string.menu_share);
 		menu.getMenu().add(0, 5, 4, R.string.menu_reset);
 		menu.getMenu().add(0, 6, 5, R.string.menu_about);
+		menu.getMenu().add(0, 7, 6, R.string.menu_local_host);
 		menu.setOnMenuItemClickListener(item -> {
 			int id = item.getItemId();
 			if (id == 1) showHostDialog();
@@ -418,6 +419,7 @@ public class MainActivity extends Activity {
 			else if (id == 4) shareHost();
 			else if (id == 5) resetPairing();
 			else if (id == 6) showAbout();
+		else if (id == 7) launchLocalHost();
 			return true;
 		});
 		menu.show();
@@ -510,6 +512,40 @@ public class MainActivity extends Activity {
 				+ "PC との操作はそのまま反映されます。")
 			.setPositiveButton("閉じる", null)
 			.show();
+	}
+
+	/**
+	 * Launch a local DSH host on the phone via Termux, then point the app at
+	 * it. Termux must be installed; if it is not, the user is sent to its
+	 * install page. This is the "standalone" mode: the phone runs its own
+	 * host and no PC is required.
+	 */
+	private void launchLocalHost() {
+		// Termux's RUN_COMMAND intent runs a command in the background.
+		Intent termux = new Intent();
+		termux.setClassName("com.termux", "com.termux.app.RunCommandService");
+		termux.setAction("com.termux.RUN_COMMAND");
+		termux.putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/dsh");
+		termux.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"web", "--host", "127.0.0.1", "--port", "3080"});
+		termux.putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home");
+		try {
+			startService(termux);
+		} catch (Exception failure) {
+			// Termux is not installed (or refused); open its install page.
+			try {
+				startActivity(new Intent(Intent.ACTION_VIEW,
+					Uri.parse("https://f-droid.org/packages/com.termux/")));
+			} catch (Exception ignored) { }
+			Toast.makeText(this, "Termux が必要です。インストール後に再試行してください。", Toast.LENGTH_LONG).show();
+			return;
+		}
+		// Point the app at the local host and persist it.
+		getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+			.putString(KEY_HOST, "127.0.0.1:3080")
+			.putString(KEY_PAIR_PATH, DEFAULT_PAIR_PATH)
+			.apply();
+		Toast.makeText(this, "ローカルホストを起動しました。接続中...", Toast.LENGTH_SHORT).show();
+		openHost("127.0.0.1:3080", DEFAULT_PAIR_PATH, false);
 	}
 
 	/**
