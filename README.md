@@ -187,6 +187,8 @@ adb reverse tcp:8099 tcp:8099
 
 ## 4. 検証したこと
 
+![DSH Mobile がスマホ上で Host として動いているところ](docs/standalone.png)
+
 ### 4.1 エミュレータ（API 35, x86_64）
 
 - APK をインストール → 初回起動でランタイムをダウンロード・検証・展開
