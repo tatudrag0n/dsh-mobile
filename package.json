@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-mobile",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Phone-oriented surface for DeepSeek Harness: LAN pairing, PWA install, mobile layout, and an offline outbox that flushes automatically when the connection returns.",
+  "description": "DeepSeek Harness on the phone: a standalone Host (Node + DSH inside the APK), smartphone-use tools, and an optional client for a PC Host.",
   "license": "MIT",
   "author": "tatudrag0n",
   "exports": {
@@ -22,6 +22,10 @@
     "dsh-mobile.ps1",
     "assets/*",
     "vendor/qrcode.js",
+    "runtime/*",
+    "scripts/*",
+    "docs/*",
+    "THIRD_PARTY_NOTICES.md",
     "README.md",
     "LICENSE"
   ],

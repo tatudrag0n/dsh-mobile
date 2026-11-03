@@ -1,0 +1,12 @@
+{
+  "name": "dsh-smartphone-use",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Phone tools for the standalone Android host: screenshots, taps, swipes, typing, keys, app launch.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "license": "MIT"
+}

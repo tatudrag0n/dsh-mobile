@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+	What the phone-use service is allowed to do.
+
+	`canPerformGestures` is what makes taps and swipes possible at all;
+	`canTakeScreenshot` lets the Host look at the screen without a
+	MediaProjection consent dialog on every capture. The flags keep the view id
+	in the tree dump, because a stable id is a far better tap target for the
+	model than a coordinate.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+	android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+	android:accessibilityFeedbackType="feedbackGeneric"
+	android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows"
+	android:canPerformGestures="true"
+	android:canRetrieveWindowContent="true"
+	android:canTakeScreenshot="true"
+	android:description="@string/phone_use_description"
+	android:notificationTimeout="100"
+	android:settingsActivity=".MainActivity" />

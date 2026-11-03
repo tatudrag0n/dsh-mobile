@@ -1,0 +1,33 @@
+# The mobile profile layer: what running the Host *on the phone* changes.
+#
+# `dsh-base` and `dsh-web-app` already gate their shell rows by platform, so
+# this layer only states the two things that differ on Android: where the
+# server listens, and the phone tools.
+#
+# A patch replaces the whole `config` of the row it targets, so each row below
+# restates every key it owns.
+#
+# {{...}} are filled in by the app when it installs this file into
+# `$DSH_HOME/profiles/mobile`: the install path differs per device, and a patch
+# row's `name` is a literal, so the app rewrites the text rather than the
+# loader evaluating an expression.
+
+# The Host listens on loopback only: the phone is the machine, so nothing has
+# to leave it, and the app's WebView is the only client.
+- id: webserver
+  config:
+    host: '127.0.0.1'
+    port: {{port}}
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
+
+# The phone tools: screenshots, gestures, typing, app launch. The app owns the
+# platform APIs and answers on a loopback bridge; this plugin is the client.
+- insert:
+    - id: smartphone-use
+      name: '{{pluginsDir}}/smartphone-use/index.js'
+      config:
+        bridgePath: '{{bridgePath}}'
+        maxWidth: 1080
+        shotDirectory: phone-shots

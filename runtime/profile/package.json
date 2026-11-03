@@ -1,0 +1,14 @@
+{
+  "name": "dsh-profile-mobile",
+  "private": true,
+  "description": "The standalone Android profile: the web surface over the phone, with no shell sandbox and no PC.",
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app"
+      ]
+    }
+  }
+}

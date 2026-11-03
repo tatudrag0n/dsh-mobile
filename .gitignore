@@ -5,6 +5,13 @@ android/.gradle/
 android/local.properties
 android/captures/
 
+# The runtime bundle is assembled per release: node, its shared libraries and
+# the DSH package tree are far too large to belong in the repository, and they
+# are rebuilt from pinned Termux packages by scripts/build-runtime.mjs.
+dist/
+android/app/src/main/jniLibs/
+android/app/src/main/assets/runtime-manifest.json
+
 # Signing material: the keystore never belongs in the repository
 *.keystore
 *.jks

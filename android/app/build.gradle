@@ -11,7 +11,11 @@ android {
 		minSdk 24
 		targetSdk 35
 		versionCode 6
+<<<<<<< HEAD
 		versionName '1.0.6'
+=======
+		versionName '1.1.0'
+>>>>>>> 13003b9 (Run the harness on the phone instead of only connecting to a PC)
 	}
 
 	signingConfigs {
@@ -44,6 +48,16 @@ android {
 	compileOptions {
 		sourceCompatibility JavaVersion.VERSION_17
 		targetCompatibility JavaVersion.VERSION_17
+	}
+
+	// The executables that make up the on-device Host (node and bash) are
+	// packaged as `lib*.so` because Android only runs binaries from the native
+	// library directory; leaving them compressed would keep them inside the APK
+	// where nothing can exec them.
+	packagingOptions {
+		jniLibs {
+			useLegacyPackaging = true
+		}
 	}
 
 	// The app has no dependencies on purpose: it is a WebView, and every

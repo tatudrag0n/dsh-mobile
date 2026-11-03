@@ -1,13 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-	<!-- The app talks to the PC's DSH Host over the local network. -->
+	<!-- Standalone mode downloads the runtime and talks to the model APIs. -->
 	<uses-permission android:name="android.permission.INTERNET" />
 	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+	<!-- The Host must survive leaving the app: it runs in a foreground service. -->
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+	<uses-permission android:name="android.permission.WAKE_LOCK" />
 	<!-- The DSH voice input bundle records from the microphone. -->
 	<uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+	<!-- The agent's file tools reach real phone files: /sdcard/DSH is the
+	     workspace when the user grants all-files access, and the app's private
+	     directory is the fallback. -->
+	<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+	<uses-permission
+		android:name="android.permission.READ_EXTERNAL_STORAGE"
+		android:maxSdkVersion="32" />
+	<uses-permission
+		android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+		android:maxSdkVersion="29" />
+
 	<uses-feature android:name="android.hardware.microphone" android:required="false" />
+	<uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+	<!-- phone_apps lists launchers; package visibility filters otherwise. -->
+	<queries>
+		<intent>
+			<action android:name="android.intent.action.MAIN" />
+			<category android:name="android.intent.category.LAUNCHER" />
+		</intent>
+	</queries>
 
 	<application
 		android:allowBackup="false"
@@ -17,6 +42,8 @@
 		android:supportsRtl="true"
 		android:hardwareAccelerated="true"
 		android:theme="@style/Theme.DshMobile"
+		android:largeHeap="true"
+		android:extractNativeLibs="true"
 		android:usesCleartextTraffic="true">
 
 		<activity
@@ -32,5 +59,27 @@
 				<category android:name="android.intent.category.LAUNCHER" />
 			</intent-filter>
 		</activity>
+
+		<!-- The Host process lives in this service, so it keeps serving while
+		     the user is in another app. -->
+		<service
+			android:name=".HostService"
+			android:exported="false"
+			android:foregroundServiceType="dataSync" />
+
+		<!-- The agent's eyes and hands: accessibility gestures, screenshots and
+		     the node tree. Enable in 設定 → ユーザー補助. -->
+		<service
+			android:name=".PhoneUseService"
+			android:exported="true"
+			android:label="@string/phone_use_label"
+			android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+			<intent-filter>
+				<action android:name="android.accessibilityservice.AccessibilityService" />
+			</intent-filter>
+			<meta-data
+				android:name="android.accessibilityservice"
+				android:resource="@xml/phone_use_service" />
+		</service>
 	</application>
 </manifest>

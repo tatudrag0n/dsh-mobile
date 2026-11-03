@@ -14,6 +14,10 @@
 	<string name="menu_reset">ペアリングをやり直す</string>
 	<string name="menu_about">DSH Mobile について</string>
 	<string name="error_title">ホストに接続できません</string>
-  <string name="repair">再ペアリング</string>
-  <string name="error_auth">ホストの認証が失効しました。\nPIN を入力して再ペアリングしてください。</string>
+	<string name="repair">再ペアリング</string>
+	<string name="error_auth">ホストの認証が失効しました。\nPIN を入力して再ペアリングしてください。</string>
+
+	<!-- The accessibility service, as it appears in Android settings. -->
+	<string name="phone_use_label">DSH Mobile スマホ操作</string>
+	<string name="phone_use_description">DSH のエージェントが画面を見て、タップ・スワイプ・文字入力をできるようにします。有効にすると、エージェントは画面の内容（表示中の文字を含む）を読み取れます。</string>
 </resources>

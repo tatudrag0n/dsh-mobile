@@ -1,0 +1,9 @@
+{
+  "name": "node-addon-require-builtin-android-arm64",
+  "version": "0.1.9",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.js",
+  "description": "Pure-JS stand-in for the native require-builtin binding on Android.",
+  "license": "MIT"
+}
