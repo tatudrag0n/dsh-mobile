@@ -1,0 +1,20 @@
+{
+	"name": "@local/dsh-mobile",
+	"version": "1.2.0",
+	"private": true,
+	"type": "module",
+	"description": "The client half of DSH Mobile: the phone layout injected into the Harness web UI.",
+	"exports": {
+		"./client": "./client.js"
+	},
+	"dsh": {
+		"client": {
+			"platform": "web",
+			"immediately": true,
+			"inject": [
+				"@deepseek-ai/dsh-client-connection",
+				"@deepseek-ai/dsh-client-ui-layout"
+			]
+		}
+	}
+}

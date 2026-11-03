@@ -4,6 +4,7 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -12,11 +13,15 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Message;
 import android.provider.Settings;
 import android.text.InputType;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowInsets;
 import android.webkit.CookieManager;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -34,6 +39,7 @@ import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.TextView;
 import android.widget.Toast;
+import java.io.File;
 
 /**
  * The DSH Mobile app.
@@ -63,6 +69,10 @@ public class MainActivity extends Activity {
 	private static final String KEY_PAIR_PATH = "pairPath";
 	/** The pairing path the plugin uses unless it is configured otherwise. */
 	private static final String DEFAULT_PAIR_PATH = "/mobile";
+	/** The scheme the Host serves the Web UI on unless the user typed one. */
+	private static final String DEFAULT_SCHEME = "http";
+	/** The port the Host serves the Web UI on unless the user typed one. */
+	private static final int DEFAULT_PORT = 3080;
 	/** The request code of the file chooser. */
 	private static final int REQUEST_FILE = 1001;
 	/** The request code of the microphone permission. */
@@ -71,6 +81,8 @@ public class MainActivity extends Activity {
 	private static final int REQUEST_NOTIFICATIONS = 1003;
 	/** How often the standalone status card is refreshed. */
 	private static final long POLL_MS = 500;
+	/** How long before a lost cookie may send the phone back to the pairing page. */
+	private static final long AUTH_RETRY_MS = 8000;
 
 	private WebView web;
 	private TextView hostLabel;
@@ -90,6 +102,14 @@ public class MainActivity extends Activity {
 	private final Handler poller = new Handler(Looper.getMainLooper());
 	private final Runnable pollTask = this::pollHost;
 	private String loadedUrl = "";
+	/** When the Host last rejected the cookie, in milliseconds. */
+	private long lastSessionLoss;
+	/** Whether a link was handed to another app, so coming back reloads. */
+	private boolean leftForBrowser;
+	/** The window a page opened for itself, while one is open. */
+	private WebView popupWeb;
+	/** The dialog that carries that window. */
+	private Dialog popupDialog;
 
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
@@ -102,6 +122,12 @@ public class MainActivity extends Activity {
 	@Override
 	protected void onResume() {
 		super.onResume();
+		if (leftForBrowser) {
+			leftForBrowser = false;
+			// The browser may have finished the login; coming back to the app is
+			// the only moment it can pick that up.
+			if (web != null) web.reload();
+		}
 		if (RuntimeStore.MODE_STANDALONE.equals(RuntimeStore.mode(this))) {
 			startPolling();
 			refreshWorkspaceLabel();
@@ -111,7 +137,28 @@ public class MainActivity extends Activity {
 	@Override
 	protected void onPause() {
 		super.onPause();
+		// The Host's cookie is the whole session, so it is flushed while the app
+		// still has focus: a kill from the task switcher would otherwise drop a
+		// login the phone had already finished.
+		CookieManager.getInstance().flush();
 		poller.removeCallbacks(pollTask);
+		// A window the page opened is not something the activity owns once it is
+		// going away; dismissing it here keeps the teardown in one place.
+		if (isFinishing()) closePopup(popupWeb);
+	}
+
+	@Override
+	protected void onDestroy() {
+		// A login window that outlives the activity keeps a WebView, its
+		// renderer and a share of the cookie jar alive with it.
+		closePopup(popupWeb);
+		// The app's own WebView holds a renderer too, and an activity that is
+		// destroyed for good has no further use for it.
+		if (web != null) {
+			web.destroy();
+			web = null;
+		}
+		super.onDestroy();
 	}
 
 	/**
@@ -124,6 +171,33 @@ public class MainActivity extends Activity {
 		root.setOrientation(LinearLayout.VERTICAL);
 		root.setBackgroundColor(getColor(R.color.dsh_background));
 		root.setFitsSystemWindows(true);
+		// Android 15 draws the window edge to edge whether the app asks or not.
+		// The listener is what keeps the bar and the WebView out from under the
+		// status and navigation bars, and out from under the keyboard: the PIN
+		// field sits at the bottom of the page, and the ime inset is the only
+		// thing that keeps it visible while typing.
+		root.setOnApplyWindowInsetsListener((view, insets) -> {
+			int top;
+			int bottom;
+			int left;
+			int right;
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+				android.graphics.Insets bars = insets.getInsets(
+					WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+				android.graphics.Insets keyboard = insets.getInsets(WindowInsets.Type.ime());
+				top = bars.top;
+				bottom = Math.max(bars.bottom, keyboard.bottom);
+				left = bars.left;
+				right = bars.right;
+			} else {
+				top = insets.getSystemWindowInsetTop();
+				bottom = insets.getSystemWindowInsetBottom();
+				left = insets.getSystemWindowInsetLeft();
+				right = insets.getSystemWindowInsetRight();
+			}
+			view.setPadding(left, top, right, bottom);
+			return insets;
+		});
 
 		root.addView(buildBar(), new LinearLayout.LayoutParams(
 			ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
@@ -194,7 +268,10 @@ public class MainActivity extends Activity {
 		settings.setBuiltInZoomControls(false);
 		settings.setDisplayZoomControls(false);
 		settings.setMediaPlaybackRequiresUserGesture(false);
-		settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+		// The settings the phone needs in every WebView of the session: the font
+		// scale, the popup windows the login drives, mixed content, file and
+		// content access, and the cookie jar. The login window gets the same set.
+		applySessionSettings(web);
 		settings.setAllowFileAccess(false);
 		settings.setAllowContentAccess(true);
 		settings.setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -204,10 +281,11 @@ public class MainActivity extends Activity {
 		web.setWebViewClient(new WebViewClient() {
 			@Override
 			public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-				Uri uri = request.getUrl();
-				if (isLocal(uri)) return false;
-				openExternally(uri);
-				return true;
+				// The Host's cookie, the pairing page and the account login all
+				// live in this WebView's jar. Handing any of them to the browser
+				// mints the session outside the app and leaves this one signed
+				// out, which is the whole "the phone cannot log in" report.
+				return handOff(request.getUrl());
 			}
 
 			@Override
@@ -242,12 +320,7 @@ public class MainActivity extends Activity {
 			public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
 				super.onReceivedHttpError(view, request, response);
 				if (!request.isForMainFrame()) return;
-				if (RuntimeStore.MODE_STANDALONE.equals(RuntimeStore.mode(MainActivity.this))) return;
-				int status = response.getStatusCode();
-				if (status != 401 && status != 403) return;
-				if (isPairingUrl(request.getUrl().toString())) return;
-				pendingError = getString(R.string.error_auth);
-				showError(pendingError);
+				onSessionHttpError(request, response);
 			}
 		});
 
@@ -255,6 +328,24 @@ public class MainActivity extends Activity {
 			@Override
 			public void onPermissionRequest(PermissionRequest request) {
 				grantAudio(request);
+			}
+
+			@Override
+			public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+				// The account login reserves a blank tab with window.open() and
+				// then navigates it to the consent page. Without a window here the
+				// call returns null, no login tab ever appears, and the attempt
+				// sits until it expires. A window nobody tapped for is refused:
+				// the WebView has no address bar to show what it covered.
+				if (!isUserGesture) return false;
+				return openPopupWindow(resultMsg);
+			}
+
+			@Override
+			public void onCloseWindow(WebView window) {
+				super.onCloseWindow(window);
+				// The login closes its own tab once the Host reports success.
+				closePopup(window);
 			}
 
 			@Override
@@ -539,7 +630,10 @@ public class MainActivity extends Activity {
 	 * @return the label.
 	 */
 	private String workspaceLabel() {
-		return RuntimeStore.workspaceDir(this).getAbsolutePath();
+		// The bar has room for a name, not for a path: the full path pushed the
+		// state text off the right edge of a phone.
+		String name = RuntimeStore.workspaceDir(this).getName();
+		return name == null || name.isEmpty() ? RuntimeStore.workspaceDir(this).getAbsolutePath() : name;
 	}
 
 	/**
@@ -671,6 +765,44 @@ public class MainActivity extends Activity {
 	}
 
 	/**
+	 * Report the things that decide whether the phone can sign in.
+	 *
+	 * "It cannot log in" is nearly always one of these: the Host is not
+	 * listening, the Host keeps its home somewhere else, or no account
+	 * credentials were ever written. The phone can answer all three itself, so
+	 * the user does not need the PC to find out which one it is.
+	 */
+	private void showDiagnostics() {
+		String mode = RuntimeStore.mode(this);
+		boolean standalone = RuntimeStore.MODE_STANDALONE.equals(mode);
+		StringBuilder report = new StringBuilder();
+		report.append("モード: ").append(standalone ? "単体" : "PC のホスト").append('\n');
+		report.append("Host: ").append(standalone ? HostService.state().name() : (currentHost().isEmpty() ? "未設定" : currentHost())).append('\n');
+		report.append("作業フォルダ: ").append(workspaceLabel()).append('\n');
+		report.append("DSH ホーム: ").append(RuntimeStore.homeDir(this).getAbsolutePath()).append('\n');
+		report.append("アカウント: ").append(accountState()).append('\n');
+		if (!standalone) {
+			report.append("アカウントログインはスマホ単体モードでのみ完了できます。");
+		}
+		new AlertDialog.Builder(this)
+			.setTitle(R.string.menu_diagnostics)
+			.setMessage(report.toString())
+			.setPositiveButton(android.R.string.ok, null)
+			.show();
+	}
+
+	/**
+	 * Whether the phone holds the account credentials the Harness writes.
+	 * @returns a line for the diagnostics card.
+	 */
+	private String accountState() {
+		// Only the presence is reported: the file itself is the secret.
+		return new File(RuntimeStore.homeDir(this), ".credentials.yaml").isFile()
+			? "ログイン済み (.credentials.yaml あり)"
+			: "未ログイン (.credentials.yaml なし)";
+	}
+
+	/**
 	 * The menu of the bar.
 	 *
 	 * @param anchor - the view the menu drops from.
@@ -688,6 +820,7 @@ public class MainActivity extends Activity {
 		menu.getMenu().add(0, 9, 8, R.string.menu_about);
 		menu.getMenu().add(0, 10, 9, "PC のホストに接続する（リモート）");
 		menu.getMenu().add(0, 11, 10, R.string.menu_local_host);
+		menu.getMenu().add(0, 12, 11, R.string.menu_diagnostics);
 		menu.setOnMenuItemClickListener(item -> {
 			switch (item.getItemId()) {
 				case 1: setModeAndRestart(RuntimeStore.MODE_STANDALONE); return true;
@@ -701,6 +834,7 @@ public class MainActivity extends Activity {
 				case 9: showAbout(); return true;
 				case 10: setModeAndRestart(RuntimeStore.MODE_REMOTE); return true;
 				case 11: launchLocalHost(); return true;
+				case 12: showDiagnostics(); return true;
 				default: return false;
 			}
 		});
@@ -838,11 +972,300 @@ public class MainActivity extends Activity {
 	 * @param uri - the target.
 	 */
 	private void openExternally(Uri uri) {
+		leftForBrowser = true;
 		try {
 			startActivity(new Intent(Intent.ACTION_VIEW, uri));
 		} catch (Exception failure) {
+			leftForBrowser = false;
 			Toast.makeText(this, "リンクを開けませんでした", Toast.LENGTH_SHORT).show();
 		}
+	}
+
+	/**
+	 * Apply the settings that decide whether a WebView belongs to this session.
+	 *
+	 * The app's WebView and the login window share one cookie jar, so they have
+	 * to share this set: the font scale, the multiple windows the login opens,
+	 * the mixed-content policy, file and content access, and the cookies an
+	 * embedded login frame needs.
+	 *
+	 * @param view - the WebView to configure.
+	 */
+	private void applySessionSettings(WebView view) {
+		WebSettings settings = view.getSettings();
+		settings.setJavaScriptEnabled(true);
+		settings.setDomStorageEnabled(true);
+		settings.setDatabaseEnabled(true);
+		settings.setUseWideViewPort(true);
+		settings.setLoadWithOverviewMode(true);
+		settings.setSupportZoom(false);
+		settings.setBuiltInZoomControls(false);
+		settings.setDisplayZoomControls(false);
+		settings.setMediaPlaybackRequiresUserGesture(false);
+		// The system font scale is not the app's to change, but the Harness UI
+		// is: at 1.3x its layout reflows into a shape the phone cannot use.
+		settings.setTextZoom(100);
+		// The account login reserves a blank tab with window.open() and then
+		// navigates it to the consent page. A WebView without multiple windows
+		// returns null there, the login tab never appears, and the attempt
+		// expires after ten minutes - which reads as "the phone cannot log in".
+		settings.setSupportMultipleWindows(true);
+		settings.setJavaScriptCanOpenWindowsAutomatically(true);
+		// The Host is served over the scheme the page itself uses, so nothing
+		// legitimate here is mixed content.
+		settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+		settings.setAllowFileAccess(false);
+		settings.setAllowContentAccess(false);
+		settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+		CookieManager.getInstance().setAcceptCookie(true);
+		CookieManager.getInstance().setAcceptThirdPartyCookies(view, true);
+	}
+
+	/**
+	 * The client a page of this session navigates with.
+	 *
+	 * The login window shares the cookie jar, so it has to share the rules too:
+	 * one allow list decides what opens inside, and one handler notices when the
+	 * Host dropped the session.
+	 *
+	 * @returns the client.
+	 */
+	private WebViewClient sessionClient() {
+		return new WebViewClient() {
+			@Override
+			public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+				return handOff(request.getUrl());
+			}
+
+			@Override
+			public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+				super.onReceivedHttpError(view, request, response);
+				onSessionHttpError(request, response);
+			}
+		};
+	}
+
+	/**
+	 * Answer a 401/403 the Host sent to a page of this session.
+	 *
+	 * Both WebViews run on the same cookie, so both have to notice when it is
+	 * gone; without this the login window sat on a blank page while the app
+	 * behind it stayed signed out.
+	 *
+	 * @param request - the request that was answered.
+	 * @param response - the response the Host sent.
+	 */
+	private void onSessionHttpError(WebResourceRequest request, WebResourceResponse response) {
+		if (!request.isForMainFrame()) return;
+		if (RuntimeStore.MODE_STANDALONE.equals(RuntimeStore.mode(this))) return;
+		int status = response.getStatusCode();
+		if (status != 401 && status != 403) return;
+		if (isPairingUrl(request.getUrl().toString())) return;
+		pendingError = getString(R.string.error_auth);
+		showError(pendingError);
+		// The cookie is gone and only the pairing page can mint a new one, so the
+		// phone is sent there instead of being left on a 401 screen.
+		loseSession();
+	}
+
+	/**
+	 * Open the window a page asked for with window.open().
+	 *
+	 * The account login reserves a blank tab and then navigates it to the
+	 * consent page, so this has to be a visible WebView that shares this app's
+	 * cookie jar: the callback has to land on a page the app can go on using. A
+	 * null here is why "log in" did nothing on the phone until the attempt
+	 * expired ten minutes later.
+	 *
+	 * @param resultMsg - the transport message the page's WebView handed over.
+	 * @return true when the window was created.
+	 */
+	private boolean openPopupWindow(Message resultMsg) {
+		if (resultMsg == null || !(resultMsg.obj instanceof WebView.WebViewTransport)) return false;
+		// A second window.open() replaces the first: leaving the old one up
+		// would leak a WebView - and its share of the cookie jar - per click.
+		// The close is deferred because this call can run on the popup itself.
+		if (popupWeb != null) closePopupSoon(popupWeb);
+		WebView popup = new WebView(this);
+		// The login window runs on the same cookie jar as the app, so it gets the
+		// same settings and the same navigation rules.
+		applySessionSettings(popup);
+		popup.setBackgroundColor(getColor(R.color.dsh_background));
+		popup.setWebViewClient(sessionClient());
+		popup.setWebChromeClient(new WebChromeClient() {
+			@Override
+			public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message message) {
+				// A window nobody asked for would let a page cover the app.
+				return isUserGesture && openPopupWindow(message);
+			}
+		});
+		Dialog dialog = new Dialog(this);
+		dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+		dialog.setContentView(popup);
+		dialog.setOnDismissListener(dismissed -> {
+			if (popupWeb != null) {
+				popupWeb.destroy();
+				popupWeb = null;
+			}
+			popupDialog = null;
+		});
+		popupWeb = popup;
+		popupDialog = dialog;
+		boolean shown = true;
+		try {
+			dialog.show();
+			Window window = dialog.getWindow();
+			if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+		} catch (Exception gone) {
+			// Showing a window from an activity that is already going away throws.
+			// The page still needs its transport answered, and the login is best
+			// continued in the app's own WebView.
+			shown = false;
+			Log.w("DshMobile", "popup: cannot show the login window: " + gone.getMessage());
+		}
+		WebView.WebViewTransport transport = (WebView.WebViewTransport) resultMsg.obj;
+		if (shown) {
+			transport.setWebView(popup);
+		} else {
+			closePopup(popup);
+			transport.setWebView(web);
+		}
+		resultMsg.sendToTarget();
+		return true;
+	}
+
+	/**
+	 * Close the window a page opened for itself.
+	 *
+	 * `null` closes whatever is open, which is what the activity's own teardown
+	 * needs: a dialog outlives the activity it was shown from and takes its
+	 * WebView, its renderer and the cookie jar with it.
+	 * @param window - the WebView the page asked to close, or null for any.
+	 */
+	private void closePopup(WebView window) {
+		if (window != null && window != popupWeb) {
+			// onCloseWindow can arrive again after the dialog took the WebView
+			// down; destroying a dead WebView throws, and it is already gone.
+			return;
+		}
+		if (popupDialog != null) {
+			// Dismissing runs the dialog's listener, which destroys the WebView.
+			popupDialog.dismiss();
+			return;
+		}
+		if (popupWeb != null) {
+			popupWeb.destroy();
+			popupWeb = null;
+		}
+	}
+
+	/**
+	 * Close a window once the callback that is running has returned.
+	 *
+	 * The popup's own onCreateWindow runs on the WebView that a close would
+	 * destroy, so closing it there tears down the object the callback is still
+	 * using.
+	 * @param previous - the window to close.
+	 */
+	private void closePopupSoon(WebView previous) {
+		View anchor = web;
+		if (anchor == null) {
+			closePopup(previous);
+			return;
+		}
+		anchor.post(() -> closePopup(previous));
+	}
+
+	/**
+	 * Decide whether a navigation is taken over by another app.
+	 *
+	 * The WebView has no address bar, so a page that opens here sits next to the
+	 * Host's cookie - and, because a page may open windows, could raise a
+	 * full-screen window of its own. An http(s) address is therefore not
+	 * trusted just for being http(s): only the Host, its loopback and the
+	 * account login the Harness drives stay inside, and everything else - plus
+	 * every non-web scheme - belongs to another app.
+	 *
+	 * @param uri - the address the page is navigating to.
+	 * @return true when the navigation was handed to another app.
+	 */
+	private boolean handOff(Uri uri) {
+		if (uri == null) return false;
+		String scheme = uri.getScheme();
+		if (scheme == null) return false;
+		// The blank document window.open("about:blank") reserves is not a link
+		// to anywhere: sending it to another app would drop the login's tab.
+		if ("about".equalsIgnoreCase(scheme) || "blob".equalsIgnoreCase(scheme)
+			|| "data".equalsIgnoreCase(scheme) || "javascript".equalsIgnoreCase(scheme)) return false;
+		if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
+			openExternally(uri);
+			return true;
+		}
+		if (staysInApp(uri)) return false;
+		openExternally(uri);
+		return true;
+	}
+
+	/**
+	 * Whether an http(s) address belongs to this session.
+	 *
+	 * The list is short on purpose: the Host itself (any port on the same host
+	 * name, and the loopback the account login calls back to) and the account
+	 * domain that login goes through. Everything here shares the cookie jar.
+	 *
+	 * @param uri - the address the page asked for.
+	 * @return true to open it in this WebView.
+	 */
+	private boolean staysInApp(Uri uri) {
+		String host = uri.getHost();
+		if (host == null) return false;
+		if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
+		// The loopback is only this Host's loopback: every other service on the
+		// phone listens there too, and this WebView carries the Host's cookie.
+		if ("localhost".equalsIgnoreCase(host) || "127.0.0.1".equals(host) || "::1".equals(host)) return isHostPort(uri.getPort());
+		if (isLocal(uri)) return true;
+		String bare = host.toLowerCase(java.util.Locale.ROOT);
+		return "deepseek.com".equals(bare) || bare.endsWith(".deepseek.com");
+	}
+
+	/**
+	 * Whether a port is the one this Host listens on.
+	 *
+	 * The login returns to `http://127.0.0.1:<port>/oauth/callback`, and only
+	 * that port is the Host; anything else on the loopback belongs to some other
+	 * app's service and has no business sharing this cookie jar.
+	 *
+	 * @param port - the port of the address, or -1 when it carries none.
+	 * @returns true when it is the Host's own port.
+	 */
+	private boolean isHostPort(int port) {
+		if (port <= 0) return false;
+		String known = currentHost();
+		if (RuntimeStore.MODE_STANDALONE.equals(RuntimeStore.mode(this))) {
+			String local = HostService.url();
+			if (local != null && !local.isEmpty()) known = local;
+		}
+		if (known.isEmpty()) return false;
+		int expected = Uri.parse(known).getPort();
+		if (expected <= 0) expected = DEFAULT_PORT;
+		return port == expected;
+	}
+
+	/**
+	 * Send the phone back to the pairing page after the Host dropped its cookie.
+	 *
+	 * The pairing page answers without a cookie, so this cannot loop; the
+	 * throttle is only there for a Host that answers 401 to everything.
+	 */
+	private void loseSession() {
+		if (RuntimeStore.MODE_STANDALONE.equals(RuntimeStore.mode(this))) return;
+		String host = currentHost();
+		if (host.isEmpty()) return;
+		long now = System.currentTimeMillis();
+		if (now - lastSessionLoss < AUTH_RETRY_MS) return;
+		lastSessionLoss = now;
+		Toast.makeText(this, R.string.need_pairing, Toast.LENGTH_LONG).show();
+		openHost(host, currentPairPath(), true);
 	}
 
 	/**
@@ -967,7 +1390,10 @@ public class MainActivity extends Activity {
 		}
 		String host = currentHost();
 		if (host.isEmpty()) return false;
-		return host.equals(origin(uri));
+		// The Host may answer on a second port (a TLS front end, a tunnel), so
+		// the host name, not the whole origin, is what makes an address "this
+		// Host" - the origin-only test sent the phone's own app to the browser.
+		return host.equals(origin(uri)) || sameHostName(host, uri);
 	}
 
 	/**
@@ -977,7 +1403,13 @@ public class MainActivity extends Activity {
 	 * @return the answer.
 	 */
 	private boolean isPairingUrl(String url) {
-		return url != null && url.contains(currentPairPath());
+		if (url == null) return false;
+		// The path, not the whole URL: a query string that happens to carry the
+		// pairing path is not the pairing page.
+		String path = Uri.parse(url).getPath();
+		if (path == null) return false;
+		String pairPath = currentPairPath();
+		return path.equals(pairPath) || path.startsWith(pairPath + "/");
 	}
 
 	/**
@@ -997,6 +1429,35 @@ public class MainActivity extends Activity {
 	}
 
 	/**
+	 * Whether an address names the same machine as an origin, whatever the port.
+	 * @param reference - an origin, e.g. `http://192.168.0.166:3080`.
+	 * @param uri - the address to compare.
+	 * @return true when the two host names match.
+	 */
+	private static boolean sameHostName(String reference, Uri uri) {
+		if (reference == null || uri == null) return false;
+		String left = Uri.parse(reference).getHost();
+		String right = uri.getHost();
+		return left != null && left.equalsIgnoreCase(right);
+	}
+
+	/**
+	 * The port of an address, with the Host's default filled in.
+	 *
+	 * The user types `192.168.0.166` far more often than not, and an origin
+	 * without a port never matches the address the WebView then loads, which
+	 * made a correctly typed host look like someone else's machine.
+	 *
+	 * @param scheme - the scheme of the address.
+	 * @param port - the port as parsed, or -1 when the address carries none.
+	 * @return the port to print, or -1 to leave it out (the scheme's own).
+	 */
+	private static int portOrDefault(String scheme, int port) {
+		if (port > 0) return port;
+		return "http".equalsIgnoreCase(scheme) ? DEFAULT_PORT : -1;
+	}
+
+	/**
 	 * Turn what the user typed into a host origin.
 	 *
 	 * @param input - the text of the field.
@@ -1005,12 +1466,14 @@ public class MainActivity extends Activity {
 	private static String normalizeHost(String input) {
 		String text = input.trim();
 		if (text.isEmpty()) return null;
-		if (!text.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) text = "http://" + text;
+		if (!text.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) text = DEFAULT_SCHEME + "://" + text;
 		Uri uri = Uri.parse(text);
 		String host = uri.getHost();
 		if (host == null || host.isEmpty()) return null;
-		StringBuilder origin = new StringBuilder("http://").append(host);
-		if (uri.getPort() > 0) origin.append(':').append(uri.getPort());
+		String scheme = uri.getScheme() == null ? DEFAULT_SCHEME : uri.getScheme();
+		StringBuilder origin = new StringBuilder(scheme).append("://").append(host);
+		int port = portOrDefault(scheme, uri.getPort());
+		if (port > 0) origin.append(':').append(port);
 		return origin.toString();
 	}
 

@@ -226,11 +226,16 @@ final class RuntimeStore {
 		copyText(new File(source, "package.json"), new File(profile, "package.json"), null);
 		String plugins = new File(runtimeDir(context), "plugins").getAbsolutePath();
 		String bridge = new File(home, "bridge.json").getAbsolutePath();
+		// Android has no desktop "Documents" directory, so the profile cannot ask
+		// the Host to discover one: the workspace controller is told where to make
+		// its first workspace instead. This is also the agent's working directory.
+		String workspace = workspaceDir(context).getAbsolutePath();
 		copyText(new File(source, "cordis.patch.yml"), new File(profile, "cordis.patch.yml"),
 			new String[][] {
 				{ "{{port}}", Integer.toString(port) },
 				{ "{{pluginsDir}}", plugins },
 				{ "{{bridgePath}}", bridge },
+				{ "{{workspace}}", workspace },
 			});
 
 		File modules = new File(home, "node_modules");

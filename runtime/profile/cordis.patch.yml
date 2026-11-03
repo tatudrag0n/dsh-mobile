@@ -31,3 +31,21 @@
         bridgePath: '{{bridgePath}}'
         maxWidth: 1080
         shotDirectory: phone-shots
+
+# The phone layout for the Web UI. A client bundle is only served for a package
+# a row loads (`dsh-client-modules` walks the live Loader entries), so the shell
+# package is mounted here even though its host half does nothing at all. Without
+# this row the standalone UI is the desktop UI squeezed into a phone.
+- insert:
+    - id: mobile-shell
+      name: '{{pluginsDir}}/mobile-shell/index.js'
+
+# Android has no "Documents" directory, and the workspace controller refuses to
+# make its first workspace without one: the composer would stay disabled at
+# "Choose a workspace to start" and no session could ever start. Point it at the
+# directory the app already uses for the agent's files instead.
+# (`documentsDirectory` is the only key this row's config carries besides a
+# timeout that has a default, and a patch replaces the whole config.)
+- id: workspace-controller
+  config:
+    documentsDirectory: '{{workspace}}'

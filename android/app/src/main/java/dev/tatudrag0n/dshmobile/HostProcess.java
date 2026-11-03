@@ -81,16 +81,92 @@ final class HostProcess {
 	}
 
 	/**
-	 * Pick a free loopback port.
+	 * Pick a free loopback port, whatever its number.
+	 *
+	 * This is the last resort behind {@link #preferredPort()}: an arbitrary port
+	 * keeps the Host bootable where the preferred range is taken, at the cost of
+	 * a new WebView origin.
 	 *
 	 * @return the port.
 	 * @throws IOException when no port can be bound.
 	 */
 	static int freePort() throws IOException {
-		try (ServerSocket socket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+		// SO_REUSEADDR only counts when it is set before the socket is bound; on
+		// a bound socket the call is accepted and does nothing.
+		try (ServerSocket socket = new ServerSocket()) {
 			socket.setReuseAddress(true);
+			socket.bind(new java.net.InetSocketAddress(java.net.InetAddress.getByName("127.0.0.1"), 0));
 			return socket.getLocalPort();
 		}
+	}
+
+	/**
+	 * Whether nothing is listening on a loopback port.
+	 * @param port - the port to probe.
+	 * @returns true when it can be bound.
+	 */
+	private static boolean portIsFree(int port) {
+		// The probe has to reuse the address too: a port left in TIME_WAIT by the
+		// previous run is free for us, and treating it as taken is what pushed
+		// the Host onto a new port - and so onto a new WebView origin - on every
+		// restart after a clean stop.
+		try (ServerSocket probe = new ServerSocket()) {
+			probe.setReuseAddress(true);
+			probe.bind(new java.net.InetSocketAddress(java.net.InetAddress.getByName("127.0.0.1"), port));
+			return true;
+		} catch (Exception busy) {
+			return false;
+		}
+	}
+
+	/**
+	 * The port the Host prefers to listen on.
+	 *
+	 * It matches the port the desktop Host and the Termux instructions use, so a
+	 * phone that pairs with either one is talking about the same origin.
+	 */
+	static final int PREFERRED_PORT = 3080;
+
+	/** How many ports above the preferred one are tried before falling back. */
+	private static final int PREFERRED_TRIES = 4;
+
+	/**
+	 * The port the Host should listen on, stable across launches.
+	 *
+	 * The WebView's origin *is* the port, and the stored session id, the read
+	 * flags and the service-worker cache are all keyed by that origin. A Host
+	 * that came up on a fresh port every launch therefore looked like a new
+	 * browser to the Harness on every start: it piled up sessions and re-showed
+	 * its notices. The preferred range is tried first; an ephemeral port stays
+	 * the last resort, because a phone where 3080 is taken still has to boot.
+	 * @returns a port nothing is listening on.
+	 * @throws IOException when even the fallback cannot be found.
+	 */
+	static int preferredPort() throws IOException {
+		for (int offset = 0; offset < PREFERRED_TRIES; offset += 1) {
+			int candidate = PREFERRED_PORT + offset;
+			if (portIsFree(candidate)) return candidate;
+		}
+		return freePort();
+	}
+
+	/**
+	 * The next port to try after one turned out to be taken.
+	 *
+	 * A retry walks forward from the port that failed instead of starting over at
+	 * the preferred one: starting over would only find the same busy port again
+	 * when something took it between the probe and the bind.
+	 * @param previous - the port that failed.
+	 * @returns a port nothing is listening on.
+	 * @throws IOException when nothing can be bound.
+	 */
+	static int portAfter(int previous) throws IOException {
+		for (int offset = 1; offset <= PREFERRED_TRIES + 4; offset += 1) {
+			int candidate = previous + offset;
+			if (candidate > 65_535) break;
+			if (portIsFree(candidate)) return candidate;
+		}
+		return freePort();
 	}
 
 	/**
@@ -100,6 +176,18 @@ final class HostProcess {
 	 * @throws IOException when the runtime is incomplete or the process cannot start.
 	 */
 	void start(int port) throws IOException {
+		// A START_STICKY redelivery or a second "start" is not a reason to run a
+		// second node: the two would fight over the port and the phone would show
+		// the boot failure card with EADDRINUSE in the log.
+		if (process != null && process.isAlive()) return;
+		// A node process can also outlive a force-stop and keep the port of the
+		// previous run, so anything recorded under our own pid file goes first.
+		stopLeftover();
+		// The pid file is only trustworthy while /proc is readable. When it is
+		// not, a stale Host is still the likeliest reason a port is taken, so the
+		// port is probed here and the caller moves on to the next one instead of
+		// letting node die on EADDRINUSE behind a boot failure card.
+		if (!portIsFree(port)) throw new IOException("ポート " + port + " は使用中です");
 		if (!RuntimeStore.isInstalled(context)) {
 			throw new IOException("ランタイムが入っていません");
 		}
@@ -140,6 +228,9 @@ final class HostProcess {
 		environment.put("TMPDIR", new File(home, "tmp").getAbsolutePath());
 		environment.put("DSH_MOBILE_PLUGINS", new File(runtime, "plugins").getAbsolutePath());
 		environment.put("DSH_MOBILE_PORT", Integer.toString(port));
+		// The plugin prints one start line with the mode, the bind address and
+		// the home; this is what fills the mode in.
+		environment.put("DSH_MOBILE_MODE", "standalone");
 		environment.put("DSH_MOBILE_BRIDGE", new File(home, "bridge.json").getAbsolutePath());
 		// The profile's bundles are resolved from the profile directory; this
 		// is the fallback when the app could not create the node_modules link.
@@ -147,6 +238,7 @@ final class HostProcess {
 		environment.put("TERM", "xterm-256color");
 
 		process = builder.start();
+		writePid(process);
 		pump = new Thread(() -> pumpLogs(log), "dsh-host-log");
 		pump.setDaemon(true);
 		pump.start();
@@ -177,6 +269,107 @@ final class HostProcess {
 			current.destroyForcibly();
 		}
 		process = null;
+		// Nothing of ours is running any more, so the pid file is stale.
+		pidFile().delete();
+	}
+
+	/**
+	 * The file that carries the pid of the Host child process.
+	 *
+	 * It lives in the app's private files: it is a handle on our own node, not
+	 * something another app has any business reading.
+	 * @returns the file.
+	 */
+	private File pidFile() {
+		return new File(context.getFilesDir(), "host.pid");
+	}
+
+	/**
+	 * Record the pid of a freshly started Host.
+	 * @param started - the process that was just started.
+	 */
+	private void writePid(Process started) {
+		int pid = pidOf(started);
+		if (pid <= 0) return;
+		try {
+			// The pid alone is not proof of anything: Android reuses them, so the
+			// start time from /proc is recorded next to it.
+			RuntimeStore.writeText(pidFile(), pid + " " + startTimeOf(pid));
+		} catch (Exception unwritable) {
+			Log.w(TAG, "host: cannot record the pid: " + unwritable.getMessage());
+		}
+	}
+
+	/**
+	 * Read the pid of a process.
+	 *
+	 * `Process.pid()` arrived in API 26 and the app supports 24, so the field is
+	 * read reflectively and a failure only means "no pid", never a crash.
+	 * @param target - the process.
+	 * @returns the pid, or 0 when it cannot be read.
+	 */
+	private static int pidOf(Process target) {
+		try {
+			java.lang.reflect.Field field = target.getClass().getDeclaredField("pid");
+			field.setAccessible(true);
+			return field.getInt(target);
+		} catch (Exception unreadable) {
+			return 0;
+		}
+	}
+
+	/**
+	 * The start time `/proc/<pid>/stat` records for a process.
+	 *
+	 * Two processes that shared a pid have different start times, which is what
+	 * makes it safe to act on a recorded pid at all.
+	 * @param pid - the process id.
+	 * @returns the start time, or 0 when /proc cannot be read.
+	 */
+	private static long startTimeOf(int pid) {
+		try {
+			String stat = RuntimeStore.readText(new File("/proc/" + pid + "/stat"));
+			int end = stat.lastIndexOf(')');
+			if (end < 0) return 0;
+			// After "pid (command)" the record continues with the state, so the
+			// start time (field 22 of the record) is the twentieth token here.
+			String[] fields = stat.substring(end + 1).trim().split("\\s+");
+			if (fields.length < 20) return 0;
+			return Long.parseLong(fields[19]);
+		} catch (Exception unreadable) {
+			return 0;
+		}
+	}
+
+	/**
+	 * Stop a Host left behind by a previous run of the app.
+	 *
+	 * The pid is only acted on when `/proc` still names it as a node process, so
+	 * a recycled pid can never take an unrelated process down with it.
+	 */
+	private void stopLeftover() {
+		File file = pidFile();
+		if (!file.isFile()) return;
+		try {
+			String text = RuntimeStore.readText(file).trim();
+			file.delete();
+			String[] parts = text.split("\\s+");
+			int pid = Integer.parseInt(parts[0]);
+			if (pid <= 0 || pid == android.os.Process.myPid()) return;
+			// A recycled pid must never be killed, so the start time recorded with
+			// it has to match the process that carries the pid now.
+			long recorded = parts.length > 1 ? Long.parseLong(parts[1]) : 0;
+			if (recorded == 0 || startTimeOf(pid) != recorded) return;
+			File command = new File("/proc/" + pid + "/cmdline");
+			String name = command.isFile() ? RuntimeStore.readText(command) : "";
+			if (!name.contains("node")) return;
+			Log.i(TAG, "host: stopping the leftover Host pid " + pid);
+			android.os.Process.killProcess(pid);
+			Thread.sleep(200);
+		} catch (Exception unreadable) {
+			// A dead, unreadable or unrecognised pid is nothing to stop; the port
+			// probe then moves the Host to the next port instead.
+		}
 	}
 
 	/**

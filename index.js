@@ -26,10 +26,10 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MANIFEST, OFFLINE_PAGE, PAIR_PAGE, SERVICE_WORKER } from "./assets/pages.js";
+import { OFFLINE_PAGE, PAIR_PAGE, SERVICE_WORKER, manifestFor, renderPairPath } from "./assets/pages.js";
 import {
-	DEFAULT_PAIR_PATH,
 	PAIR_FILE,
+	createPinGate,
 	dshHome,
 	generatePin,
 	lanAddresses,
@@ -57,9 +57,10 @@ export const inject = ["webServer", "connection"];
  * client assets into the cache name makes the browser install a new worker
  * (and drop the old cache) as soon as the plugin changes.
  *
+ * @param pairPath - the prefix every route of this plugin lives under.
  * @returns the service worker source.
  */
-function serviceWorkerSource() {
+function serviceWorkerSource(pairPath) {
 	let version = "0";
 	try {
 		const hash = createHash("sha256");
@@ -70,7 +71,7 @@ function serviceWorkerSource() {
 	} catch {
 		// Fall back to a fixed version; the worker still works, just not versioned.
 	}
-	return SERVICE_WORKER.replace("__DSH_MOBILE_VERSION__", version);
+	return renderPairPath(SERVICE_WORKER, pairPath).replace("__DSH_MOBILE_VERSION__", version);
 }
 
 async function readBody(request) {
@@ -98,7 +99,12 @@ function clientAddress(request) {
 export function apply(ctx, config) {
 	const options = resolveOptions(config);
 	const pin = options.pin === "" ? generatePin() : options.pin;
-	const failures = new Map();
+	// The wrong-PIN counter and its lockout live in the pure helper, so the
+	// lockout can be exercised by the unit tests without booting a Host.
+	const pinGate = createPinGate({ ...options, pin });
+	// The start banner and the pairing card are written once, when the port is
+	// known.
+	let cardWritten = false;
 	// This Host build serves plain HTTP. A TLS front end (a reverse proxy, or
 	// `tailscale serve`) is what turns the LAN address into an https:// one.
 	const protocol = "http";
@@ -162,6 +168,27 @@ export function apply(ctx, config) {
 	}
 
 	/**
+	 * Write the pairing card once the port has settled.
+	 *
+	 * The plugin mounts before the HTTP carrier finished listening, so a card
+	 * written at mount time would advertise `undefined` as its port - and the
+	 * card is the PC's only copy of the PIN and the URL. Both hooks (mount and
+	 * index-inject) call this: the first to see a real port writes, and the
+	 * write never repeats, so two renames can never race over the same
+	 * temporary file. With no port there is nothing worth writing.
+	 */
+	function writeCardWhenReady() {
+		if (cardWritten || listener().port === undefined) return;
+		cardWritten = true;
+		const current = listener();
+		// One line a support case can be read from: the mode this Host runs in,
+		// the address it bound to, and the home the card lands in. The PIN never
+		// goes here.
+		console.log(`dsh-mobile: start mode=${process.env.DSH_MOBILE_MODE ?? "host"} bind=${bindHost} port=${String(current.port ?? "unknown")} home=${dshHome()}`);
+		void writeCard();
+	}
+
+	/**
 	 * Whether this requester may read the launch URL without the PIN.
 	 * @param request - the incoming request.
 	 * @returns true when the request carries a valid Host session.
@@ -185,30 +212,6 @@ export function apply(ctx, config) {
 			alternatives: current.extra.map((entry) => ctx.connection.authenticatedUrl(entry)),
 			pinRequired: false,
 		};
-	}
-
-	/**
-	 * Check a presented PIN against the lockout counter.
-	 * @param address - the client address.
-	 * @param presented - the PIN the client sent.
-	 * @returns `{ ok: true }` or `{ ok: false, reason }`.
-	 */
-	function checkPin(address, presented) {
-		const record = failures.get(address);
-		const now = Date.now();
-		if (record !== undefined && record.lockedUntil > now) return { ok: false, reason: "locked" };
-		if (record !== undefined && record.lockedUntil <= now) failures.delete(address);
-		if (presented !== pin) {
-			const next = (record?.attempts ?? 0) + 1;
-			if (next >= options.maxAttempts) {
-				failures.set(address, { attempts: next, lockedUntil: now + options.lockoutMinutes * 60_000 });
-				return { ok: false, reason: "locked" };
-			}
-			failures.set(address, { attempts: next, lockedUntil: 0 });
-			return { ok: false, reason: "wrong" };
-		}
-		failures.delete(address);
-		return { ok: true };
 	}
 
 	/**
@@ -261,7 +264,7 @@ export function apply(ctx, config) {
 		kind: "exact",
 		path: options.pairPath,
 		handler: (request, response) => {
-			sendText(response, 200, "text/html; charset=utf-8", PAIR_PAGE);
+			sendText(response, 200, "text/html; charset=utf-8", renderPairPath(PAIR_PAGE, options.pairPath));
 		},
 	}), "dsh-mobile: pairing page");
 
@@ -288,7 +291,7 @@ export function apply(ctx, config) {
 			} catch {
 				presented = "";
 			}
-			const verdict = checkPin(clientAddress(request), presented);
+			const verdict = pinGate.check(clientAddress(request), presented);
 			if (!verdict.ok) {
 				sendJson(response, 403, { status: "error", reason: verdict.reason });
 				return;
@@ -351,7 +354,7 @@ export function apply(ctx, config) {
 		kind: "exact",
 		path: `${options.pairPath}/manifest.webmanifest`,
 		handler: (request, response) => {
-			sendJson(response, 200, MANIFEST);
+			sendJson(response, 200, manifestFor(options.pairPath));
 		},
 	}), "dsh-mobile: manifest");
 
@@ -362,7 +365,7 @@ export function apply(ctx, config) {
 		kind: "exact",
 		path: "/sw.js",
 		handler: (request, response) => {
-			sendText(response, 200, "text/javascript; charset=utf-8", serviceWorkerSource());
+			sendText(response, 200, "text/javascript; charset=utf-8", serviceWorkerSource(options.pairPath));
 		},
 	}), "dsh-mobile: service worker");
 
@@ -405,17 +408,27 @@ export function apply(ctx, config) {
 				lanReachable: current.lan !== undefined,
 			},
 		});
+		// The UI renders only after the carrier is listening, so this is the
+		// first moment the card can already carry a real port.
+		writeCardWhenReady();
 	});
 
 	// The owner reads the PIN off the PC screen; the terminal card is the
 	// reliable channel, and the card file is the fallback for a Host whose
 	// output nobody sees (the desktop app).
-	void writeCard();
+	writeCardWhenReady();
 	const current = listener();
 	console.log("dsh-mobile: phone pairing ready");
 	console.log(`dsh-mobile:   PIN   ${pin}`);
 	console.log(`dsh-mobile:   URL   ${current.lan === undefined ? current.launchUrl : current.lanLaunchUrl}`);
 	if (current.lan !== undefined) console.log(`dsh-mobile:   PIN page ${current.lan}${options.pairPath}`);
+	// A Host bound to the loopback is invisible to the phone whatever the
+	// addresses below say, so that mistake gets its own warning.
+	const loopbackBind = bindHost === "127.0.0.1" || bindHost === "::1" || bindHost === "localhost";
+	if (loopbackBind) {
+		console.log("dsh-mobile:   the webserver is bound to the loopback address, so no phone can reach it");
+		console.log("dsh-mobile:   set the webserver host to 0.0.0.0 and restart the Host");
+	}
 	if (current.lan === undefined) {
 		console.log("dsh-mobile:   no LAN address found; bind the webserver to 0.0.0.0 to reach this host from a phone");
 	} else {

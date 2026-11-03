@@ -3,7 +3,8 @@
 	<string name="app_name">DSH Mobile</string>
 	<string name="setup_title">DSH ホストに接続</string>
 	<string name="setup_subtitle">PC と同じ Wi-Fi にある DSH ホストのアドレスを入力してください。例: 192.168.0.166:3080</string>
-	<string name="setup_hint">接続すると、PC に表示されているペアリングPINの入力画面が開きます。PIN は起動のたびに変わります。</string>
+	<string name="setup_hint">接続すると、PC に表示されているペアリングPINの入力画面が開きます。PIN は起動のたびに変わります。\nアカウントログイン（DeepSeek アカウント）はスマホ単体モードでのみ完了できます。PC のホストに接続している間は、PC 側でログインしてください。</string>
+	<string name="need_pairing">ペアリングが必要です · PC の PIN を入力してください</string>
 	<string name="connect">接続する</string>
 	<string name="retry">再試行</string>
 	<string name="menu_host">接続先を変更</string>
@@ -13,6 +14,7 @@
 	<string name="menu_share">接続先を共有</string>
 	<string name="menu_reset">ペアリングをやり直す</string>
 	<string name="menu_about">DSH Mobile について</string>
+	<string name="menu_diagnostics">接続診断</string>
 	<string name="error_title">ホストに接続できません</string>
 	<string name="repair">再ペアリング</string>
 	<string name="error_auth">ホストの認証が失効しました。\nPIN を入力して再ペアリングしてください。</string>

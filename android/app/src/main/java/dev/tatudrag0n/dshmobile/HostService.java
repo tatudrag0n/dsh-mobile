@@ -175,7 +175,12 @@ public class HostService extends Service {
 				bridge.start();
 			}
 
-			int hostPort = HostProcess.freePort();
+			int hostPort = HostProcess.preferredPort();
+			// One line the support case can be read from: a fallback port means
+			// the phone will start with a fresh WebView origin (and so a fresh
+			// session), which explains a lost login.
+			Log.i(TAG, "host: loopback port " + hostPort
+				+ (hostPort == HostProcess.PREFERRED_PORT ? " (preferred)" : " (fallback)"));
 			RuntimeStore.prepareHome(this, hostPort, bridge.port(), bridge.token());
 
 			message = "Host を起動しています…";
@@ -205,7 +210,22 @@ public class HostService extends Service {
 					updateNotification();
 				}
 			});
-			host.start(hostPort);
+			// A port that a leftover node still holds must not become a boot failure
+		// card: the home is prepared again for the next free port and the Host is
+		// started there. Three attempts walk past a stale process without
+		// looping, and the last failure is reported as it always was.
+		int port = hostPort;
+		for (int attempt = 0; ; attempt += 1) {
+			try {
+				host.start(port);
+				break;
+			} catch (java.io.IOException busy) {
+				if (attempt >= 2) throw busy;
+				port = HostProcess.portAfter(port);
+				RuntimeStore.prepareHome(this, port, bridge.port(), bridge.token());
+				Log.w(TAG, "host: port busy, retrying on " + port + " (" + busy.getMessage() + ")");
+			}
+		}
 		} catch (Exception failure) {
 			state = State.FAILED;
 			url = "";

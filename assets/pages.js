@@ -5,6 +5,35 @@
  * them to the wire as-is, so a phone needs nothing but a browser.
  */
 
+/**
+ * The placeholder every route of this plugin is written against.
+ *
+ * The routes live under the configured pairing path, which is not always
+ * `/mobile`. A page that fetched a hard-coded `/mobile/pair` answered 404 as
+ * soon as the path was configured to something else, and because the fetch had
+ * no catch the PIN button simply did nothing. The templates carry this token
+ * and the host fills in the real path when it serves them.
+ */
+export const PAIR_PATH_TOKEN = "__DSH_PAIR_PATH__";
+
+/** The pairing path a template falls back to when it is handed nothing usable. */
+const FALLBACK_PAIR_PATH = "/mobile";
+
+/**
+ * Fill the pairing path into a template.
+ *
+ * The value ends up in an HTML attribute and in a script string literal, so it
+ * is reduced to the characters a route can contain: a path carrying a quote or
+ * an angle bracket would otherwise be a page-level injection, not a typo.
+ * @param {string} template - a template carrying {@link PAIR_PATH_TOKEN}.
+ * @param {string} pairPath - the prefix every route of this plugin lives under.
+ * @returns {string} the text to serve.
+ */
+export function renderPairPath(template, pairPath) {
+	const safe = typeof pairPath === "string" ? pairPath.replace(/[^A-Za-z0-9/._~-]/g, "") : "";
+	return template.split(PAIR_PATH_TOKEN).join(safe === "" ? FALLBACK_PAIR_PATH : safe);
+}
+
 /** The web app manifest, served next to the pairing card. */
 export const MANIFEST = {
 	name: "DeepSeek Harness",
@@ -16,12 +45,27 @@ export const MANIFEST = {
 	orientation: "portrait-primary",
 	background_color: "#15171c",
 	theme_color: "#15171c",
-	icons: [
-		{ src: "/mobile/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
-		{ src: "/mobile/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
-		{ src: "/mobile/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
-	],
 };
+
+/**
+ * The manifest with its icons resolved against the pairing path.
+ *
+ * The installer reads the icons relative to the manifest, but a manifest is
+ * per-install anyway, so the host builds it per pairing path instead of
+ * shipping a `/mobile/...` that a renamed path would break.
+ * @param {string} pairPath - the prefix every route of this plugin lives under.
+ * @returns {object} the manifest.
+ */
+export function manifestFor(pairPath) {
+	return {
+		...MANIFEST,
+		icons: [
+			{ src: `${pairPath}/icon-192.png`, sizes: "192x192", type: "image/png", purpose: "any" },
+			{ src: `${pairPath}/icon-512.png`, sizes: "512x512", type: "image/png", purpose: "any" },
+			{ src: `${pairPath}/icon.svg`, sizes: "any", type: "image/svg+xml", purpose: "any" },
+		],
+	};
+}
 
 /**
  * The service worker: an offline shell, never an API cache.
@@ -32,7 +76,7 @@ export const MANIFEST = {
  * `/api` prefix is never touched: the Host is the source of truth for state.
  */
 export const SERVICE_WORKER = `const CACHE = 'dsh-mobile-v1-__DSH_MOBILE_VERSION__';
-const OFFLINE = '/mobile/offline.html';
+const OFFLINE = '__DSH_PAIR_PATH__/offline.html';
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
@@ -190,8 +234,9 @@ export const PAIR_PAGE = `<!doctype html>
       <p class="host" id="host"></p>
     </main>
 
-    <script src="/mobile/qr.js"></script>
+    <script src="__DSH_PAIR_PATH__/qr.js"></script>
     <script>
+      const PAIR_PATH = '__DSH_PAIR_PATH__';
       const lead = document.getElementById('lead');
       const form = document.getElementById('pin-form');
       const qrBox = document.getElementById('qr');
@@ -238,13 +283,25 @@ export const PAIR_PAGE = `<!doctype html>
         document.getElementById('qr-image').appendChild(canvas);
       }
 
+      const MESSAGES = {
+        locked: '試行回数が多すぎます。しばらくしてからお試しください。',
+        network: 'ホストに接続できません。Wi-Fi と PC の DSH を確認してください。',
+        wrong: 'PIN が違います。PC に表示されている PIN を確認してください。',
+      };
+
       async function request(pin) {
-        const response = await fetch('/mobile/pair', {
-          method: pin === undefined ? 'GET' : 'POST',
-          headers: pin === undefined ? {} : { 'content-type': 'application/json' },
-          body: pin === undefined ? undefined : JSON.stringify({ pin }),
-        });
-        return await response.json();
+        try {
+          const response = await fetch(PAIR_PATH + '/pair', {
+            method: pin === undefined ? 'GET' : 'POST',
+            headers: pin === undefined ? {} : { 'content-type': 'application/json' },
+            body: pin === undefined ? undefined : JSON.stringify({ pin }),
+          });
+          return await response.json();
+        } catch {
+          // A dropped connection used to leave the button doing nothing at all;
+          // the phone has to be told the host was not reached.
+          return { status: 'error', reason: 'network' };
+        }
       }
 
       form.addEventListener('submit', async (event) => {
@@ -253,7 +310,7 @@ export const PAIR_PAGE = `<!doctype html>
         const pin = document.getElementById('pin').value.trim();
         const payload = await request(pin);
         if (payload.status === 'ok') { showPairing(payload); return; }
-        error.textContent = payload.reason === 'locked' ? '試行回数が多すぎます。しばらくしてからお試しください。' : 'PIN が違います。';
+        error.textContent = MESSAGES[payload.reason] ?? MESSAGES.wrong;
       });
 
       document.getElementById('go').addEventListener('click', () => { if (target) location.href = target; });
@@ -261,6 +318,7 @@ export const PAIR_PAGE = `<!doctype html>
       request().then((payload) => {
         if (payload.status === 'ok') { showPairing(payload); return; }
         form.classList.remove('hidden');
+        if (payload.reason === 'network') error.textContent = MESSAGES.network;
       }).catch(() => { form.classList.remove('hidden'); });
     </script>
   </body>

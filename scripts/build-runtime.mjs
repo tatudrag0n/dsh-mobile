@@ -30,7 +30,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const repo = path.resolve(here, '..')
 
 /** The version string stored in the bundle manifest. */
-const VERSION = '1.1.0'
+const VERSION = '1.2.0'
 
 /** Directories inside a DSH runtime tree that only exist for other platforms. */
 const FOREIGN = [
@@ -92,6 +92,12 @@ cpSync(path.join(repo, 'runtime', 'shim', 'require-builtin'), shimTarget, { recu
 cpSync(path.join(repo, 'runtime', 'plugins'), path.join(bundle, 'plugins'), { recursive: true })
 cpSync(path.join(repo, 'runtime', 'profile'), path.join(bundle, 'profile'), { recursive: true })
 rmSync(path.join(bundle, 'plugins', 'README.md'), { force: true })
+// The phone layout is the repository's own client plugin, whose single source
+// of truth is `client.js` at the root. The standalone profile has no
+// `node_modules` link back to this repository, so the shell package that
+// carries `dsh.client` is assembled here: package.json and index.js come from
+// runtime/plugins/mobile-shell, and the bundle itself is copied in now.
+cpSync(path.join(repo, 'client.js'), path.join(bundle, 'plugins', 'mobile-shell', 'client.js'))
 
 console.log('4/6 実行ファイルを jniLibs へ配置しています…')
 // Android only lets an app execute files from its native library directory:
