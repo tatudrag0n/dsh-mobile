@@ -33,7 +33,7 @@ Android には公式の Node.js バイナリがありません。このプロジ
 
 | 部品 | 中身 |
 | --- | --- |
-| `bin/node` | Termux の Node 26（`--expose-internals` 付きで起動） |
+| `bin/node` | ロックに記録した Termux の Node（`--expose-internals` 付きで起動） |
 | `lib/*.so` | Node がリンクする ICU / OpenSSL / zlib など |
 | `app/` | DSH のパッケージツリー（デスクトップ版と同じもの） |
 | `plugins/` | スマホ操作用の DSH プラグイン |
@@ -47,7 +47,8 @@ Android には公式の Node.js バイナリがありません。このプロジ
 ライブラリディレクトリなので、実行も読み込みも許可されます。
 
 APK を更新するとネイティブライブラリのディレクトリ名が変わるため、
-リンクは起動時に貼り直します（数百 MB の再ダウンロードはしません）。
+同じランタイムのままならリンクだけを貼り直します。対応ランタイムのハッシュが
+変わった場合は、新版を検証・取得してから置き換えます。
 
 ### 1.2 DSH のブートを成立させているもの
 
@@ -168,41 +169,28 @@ SHA-256 で検証してから展開します。展開後はオフラインでも
 
 ## 3. ビルド
 
-ランタイムと APK は 2 段階で作ります。
+完全な手順は **[開発・検証・リリース手順](docs/development.md)** を参照してください。
+Node.js 22 以上、JDK 17、Android SDK 35 が必要です。ランタイムの組み立ては
+Linux / WSL 上で行い、DSH のパッケージツリーを別途用意します。
 
-```powershell
-# 1. ランタイム（Node + DSH）を組み立てる。
-#    --dsh は DSH のパッケージツリー（node_modules/@deepseek-ai/dsh を含む）
-node scripts\build-runtime.mjs --abi arm64-v8a --dsh C:\path\to\dsh\runtime
-node scripts\build-runtime.mjs --abi x86_64   --dsh C:\path\to\dsh\runtime
-
-# 2. APK
-$env:JAVA_HOME = "C:\Program Files\Java\jdk-17"
+```sh
+npm test
+# 初回だけ Termux ロックを生成・レビューする（詳細は開発手順）
+node scripts/build-runtime.mjs --abi arm64-v8a --dsh /path/to/dsh-tree --update-lock true
+# 通常のビルドでは固定済みロックを使う
+node scripts/build-runtime.mjs --abi arm64-v8a --dsh /path/to/dsh-tree
 cd android
-.\gradlew.bat assembleRelease
+bash gradlew assembleDebug testDebugUnitTest lintDebug
 ```
 
-`build-runtime.mjs` は次を出力します。
+生成物は `dist/dsh-mobile-runtime-<abi>.zip`、`android/app/src/main/jniLibs/<abi>/`、
+`android/app/src/main/assets/runtime-manifest.json` です。x86_64 のエミュレータ用には
+同じ DSH ツリーを使って `--abi x86_64` でも組み立てます。
 
-- `dist/dsh-mobile-runtime-<abi>.zip`（アプリが最初に落とすもの）
-- `android/app/src/main/jniLibs/<abi>/lib*.so`（実行ファイルと共有ライブラリ）
-- `android/app/src/main/assets/runtime-manifest.json`（ABI ごとの URL と SHA-256）
-
-`--abi` を省略すると `arm64-v8a` です。実機は arm64、エミュレータは x86_64 を
-使います（`jniLibs` に両方入れておけば 1 つの APK で両方動きます）。
-
-ランタイムの入手先を変えたいときは `--url` を渡します。
-
-```powershell
-node scripts\build-runtime.mjs --abi arm64-v8a --dsh ... --url https://example.com/dsh-mobile-runtime-arm64-v8a.zip
-```
-
-テスト中の配布は、ローカルの HTTP サーバーと `adb reverse` で試せます。
-
-```powershell
-node scripts\serve-runtime.mjs dist 8099
-adb reverse tcp:8099 tcp:8099
-```
+- 依存ロックの初期内容は空です。未検証の依存情報は含めていません。リリース準備時に両アーキテクチャ分を生成・検証してください。
+- ランタイム URL は固定のリリースタグ付きです。対応する ZIP と APK を一緒に公開してください。
+- `assembleRelease` は明示的な署名設定が必須です。デバッグキーへの自動切り替えはしません。
+- ランタイムを組み立てずにデバッグ APK をコンパイルすることもできますが、その APK では単体 Host は起動しません。
 
 ---
 
@@ -219,7 +207,7 @@ adb reverse tcp:8099 tcp:8099
   `tap` / `swipe` / `type`（日本語）/ `key` / `apps` / `launch` が成功
   - `phone_type` で「ネットワーク」を Settings の検索欄へ入力できた
   - `phone_screen` の PNG は 1080×2400 で保存された
-- APK を入れ直すと **リンクだけ貼り直して再起動**（再ダウンロードなし）
+- 同じランタイムを使う APK の入れ直しでは、リンクの貼り直しで再起動（従来版の検証記録）
 - 全ファイルアクセスを許可すると作業場所が `/storage/emulated/0/DSH` になる
 
 ### 4.2 実機（M08, Android 16, arm64）
@@ -235,8 +223,10 @@ adb reverse tcp:8099 tcp:8099
 node --test
 ```
 
-- `test/smartphone-use.test.mjs`: プラグインの 11 テスト（実 HTTP の偽ブリッジ）
-- `test/host.test.js`, `test/routes.test.js`: 既存のペアリング/ルート
+- Node テスト：ペアリング、本文制限、Service Worker、送信キュー、依存ロック、スマホ操作プラグイン。
+- 実 Host 向けテストは通常スキップされます。`DSH_MOBILE_TEST_URL` を設定し `npm run test:live` で明示的に実行してください。
+- Android の JVM / instrumentation テストと CI は [開発手順](docs/development.md) を参照してください。
+- 上記の端末検証記録は従来版の記録であり、最新変更の実機検証を保証するものではありません。
 
 ---
 
@@ -274,7 +264,9 @@ node --test
 - **`node-pty` を使う端末タブは動きません**（Android 向け prebuild が無い）。
   シェルは `bash`（Termux 版を同梱）で動きます。
 - **Termux の Node を同梱**しています。ライセンスは `THIRD_PARTY_NOTICES.md`。
-- アプリを更新すると Host は再起動します（セッションは残ります）。
+- アプリ更新時はランタイムのハッシュを確認し、必要なら対応版を再取得します（セッションは残ります）。
+- **Android 15 以降のバックグラウンド実行は無制限ではありません**。`dataSync` サービスの時間制限に達すると安全に停止し、アプリ内に再起動案内を表示します。
+- **独立したスマホ Host と PC Host の会話・プラグイン自動複製は未実装**です。[同期の実装状況](docs/standalone-and-sync.md) を参照してください。
 
 ---
 

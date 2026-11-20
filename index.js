@@ -21,6 +21,7 @@
  * for a while. The launch URL is the process's one-shot token, so the phone
  * trades it for a signed cookie that lasts `cookieMaxAgeDays` (30 by default).
  */
+import { readBody } from "./lib/http.js";
 import { createHash } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
@@ -74,20 +75,14 @@ function serviceWorkerSource(pairPath) {
 	return renderPairPath(SERVICE_WORKER, pairPath).replace("__DSH_MOBILE_VERSION__", version);
 }
 
-async function readBody(request) {
-	const chunks = [];
-	for await (const chunk of request) chunks.push(chunk);
-	return Buffer.concat(chunks).toString("utf8");
-}
-
 /**
  * The client address of a request, for the PIN attempt counter.
  * @param request - the incoming request.
  * @returns the address text.
  */
 function clientAddress(request) {
-	const forwarded = request.headers["x-forwarded-for"];
-	if (typeof forwarded === "string" && forwarded !== "") return forwarded.split(",")[0].trim();
+	// Never trust caller-controlled forwarding headers. Proxy deployments share
+	// the proxy socket address; enforce per-client limits at that proxy too.
 	return request.socket?.remoteAddress ?? "unknown";
 }
 
@@ -288,7 +283,12 @@ export function apply(ctx, config) {
 			try {
 				const body = JSON.parse(await readBody(request));
 				if (typeof body?.pin === "string") presented = body.pin.trim();
-			} catch {
+			} catch (error) {
+				if (error.status) {
+					response.setHeader("connection", "close");
+					sendJson(response, error.status, { status: "error", reason: error.message });
+					return;
+				}
 				presented = "";
 			}
 			const verdict = pinGate.check(clientAddress(request), presented);
@@ -372,22 +372,11 @@ export function apply(ctx, config) {
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: `${options.pairPath}/sync`,
-		handler: async (request, response) => {
-			if (request.method === "GET") {
-				sendJson(response, 200, {
-					status: "ok",
-					deviceId: `host-${options.pairPath}`,
-					now: new Date().toISOString(),
-				});
-				return;
-			}
-			if (request.method === "POST") {
-				let body = {};
-				try { body = JSON.parse(await readBody(request)); } catch { body = {}; }
-				sendJson(response, 200, { status: "ok", received: true, from: body?.from ?? null });
-				return;
-			}
-			sendJson(response, 405, { status: "error", reason: "method" });
+		handler: (request, response) => {
+			// Independent-Host replication is not implemented. Never acknowledge
+			// events that have not been validated and durably stored.
+			response.setHeader("connection", "close");
+			sendJson(response, 501, { status: "error", reason: "sync-not-implemented" });
 		},
 	}), "dsh-mobile: sync endpoint");
 

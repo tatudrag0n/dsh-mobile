@@ -71,11 +71,11 @@ export function manifestFor(pairPath) {
  * The service worker: an offline shell, never an API cache.
  *
  * Navigations are network-first (the page carries a live boot payload, so a
- * stale copy would be wrong) and fall back to the offline page. Static assets
- * carry a content hash in their file name, so they are cached forever. The
- * `/api` prefix is never touched: the Host is the source of truth for state.
+ * stale copy would be wrong) and fall back to the offline page. Only the
+ * plugin's explicitly listed icons are cached. Auth, pairing, Host bundles
+ * and API responses always go to the network.
  */
-export const SERVICE_WORKER = `const CACHE = 'dsh-mobile-v1-__DSH_MOBILE_VERSION__';
+export const SERVICE_WORKER = `const CACHE = 'dsh-mobile-v2-__DSH_MOBILE_VERSION__';
 const OFFLINE = '__DSH_PAIR_PATH__/offline.html';
 
 self.addEventListener('install', (event) => {
@@ -89,7 +89,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     for (const key of await caches.keys()) {
-      if (key !== CACHE) await caches.delete(key);
+      if (key.startsWith('dsh-mobile-') && key !== CACHE) await caches.delete(key);
     }
     await self.clients.claim();
   })());
@@ -107,19 +107,24 @@ self.addEventListener('fetch', (event) => {
       try {
         return await fetch(request);
       } catch {
-        const cached = await caches.match(OFFLINE);
+        const cached = await (await caches.open(CACHE)).match(OFFLINE);
         return cached ?? new Response('offline', { status: 503, headers: { 'content-type': 'text/plain' } });
       }
     })());
     return;
   }
+  // An explicit allowlist, not an extension heuristic: auth URLs and plugin
+  // APIs must never enter Cache Storage, even if their responses look static.
+  const assets = ['icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+  if (url.search || !assets.some(name => url.pathname === '__DSH_PAIR_PATH__/' + name)) return;
   event.respondWith((async () => {
-    const cached = await caches.match(request);
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(request);
     if (cached) return cached;
     const response = await fetch(request);
-    if (response.ok && response.type === 'basic') {
-      const cache = await caches.open(CACHE);
-      cache.put(request, response.clone());
+    if (response.ok && response.type === 'basic'
+        && !/(?:no-store|private|no-cache)/i.test(response.headers.get('cache-control') || '')) {
+      await cache.put(request, response.clone()).catch(() => {});
     }
     return response;
   })());

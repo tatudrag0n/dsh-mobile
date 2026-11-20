@@ -46,7 +46,7 @@ export function zip(entries) {
   const chunks = []
   const directory = []
   let offset = 0
-  const stamp = dosTime(new Date())
+  const stamp = dosTime(new Date(Math.max(315532800, Number(process.env.SOURCE_DATE_EPOCH ?? 315532800)) * 1000))
 
   for (const entry of entries) {
     const name = Buffer.from(entry.name, 'utf8')
@@ -113,7 +113,7 @@ export function zip(entries) {
  * @returns {{ time: number, date: number }} The two 16-bit fields.
  */
 function dosTime(date) {
-  const time = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2)
-  const day = ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate()
+  const time = (date.getUTCHours() << 11) | (date.getUTCMinutes() << 5) | Math.floor(date.getUTCSeconds() / 2)
+  const day = ((date.getUTCFullYear() - 1980) << 9) | ((date.getUTCMonth() + 1) << 5) | date.getUTCDate()
   return { time, date: day }
 }

@@ -31,7 +31,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "test:live": "node --test"
+    "test:live": "node scripts/run-live-tests.mjs"
   },
   "dsh": {
     "bundle": {
@@ -45,5 +45,8 @@
         "@deepseek-ai/dsh-client-ui-layout"
       ]
     }
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
