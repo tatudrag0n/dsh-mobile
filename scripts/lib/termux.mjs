@@ -7,14 +7,14 @@
  * dependency closure, downloads the `.deb` files into a cache, and unpacks
  * the `bin/` and `lib/` trees out of each Debian archive.
  *
- * The archives are `ar` containers holding `data.tar.xz`; Windows cannot
- * create the symlinks the packages ship (and `libc++` is not even a legal
- * Windows file name), so those entries are skipped and the SONAMEs the loader
- * asks for are materialised as copies afterwards ({@link materializeLinks}).
+ * The archives are `ar` containers holding compressed data.tar members.
+ * Build on Linux/WSL: extraction failures are fatal, not silently skipped.
+ * SONAME links are materialised as copies for Android APK packaging.
  */
 
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, renameSync } from 'node:fs'
 import path from 'node:path'
 
 /** The Termux repository the packages come from. */
@@ -54,7 +54,7 @@ export const ROOTS = ['nodejs', 'bash']
  */
 async function readIndex(arch) {
   const url = `${MIRROR}/dists/stable/main/binary-${arch}/Packages`
-  const response = await fetch(url)
+  const response = await fetch(url, { signal: AbortSignal.timeout(30000) })
   if (!response.ok) throw new Error(`${url} -> HTTP ${response.status}`)
   const text = await response.text()
   const packages = new Map()
@@ -121,6 +121,37 @@ export function resolveClosure(index, roots) {
   return [...wanted].sort().map((name) => index.get(name))
 }
 
+/** Resolve latest dependencies only on an explicit lock update. Normal builds never read the index. */
+export async function lockedPackages({ arch, lockFile, updateLock = false, indexLoader = readIndex }) {
+  if (!lockFile) throw new Error('A Termux lock file is required')
+  const lock = existsSync(lockFile) ? JSON.parse(readFileSync(lockFile, 'utf8')) : { schemaVersion: 1, architectures: {} }
+  if (lock.schemaVersion !== 1) throw new Error('Unsupported Termux lock schema')
+  if (updateLock) {
+    const packages = resolveClosure(await indexLoader(arch), ROOTS)
+    for (const entry of packages) validatePackage(entry, arch)
+    lock.architectures[arch] = packages
+    mkdirSync(path.dirname(lockFile), { recursive: true })
+    writeFileSync(lockFile, JSON.stringify(lock, null, 2) + '\n')
+  }
+  const packages = lock.architectures?.[arch]
+  if (!Array.isArray(packages) || !packages.length) throw new Error(`No lock for ${arch}; explicitly run --update-lock true and review the resulting lock file`)
+  for (const entry of packages) validatePackage(entry, arch)
+  const closure = resolveClosure(new Map(packages.map(entry => [entry.Package, entry])), ROOTS)
+  if (closure.length !== packages.length) throw new Error('Termux lock contains duplicate or unrelated packages')
+  return closure
+}
+
+function validatePackage(entry, arch) {
+  if (!entry || !/^[a-z0-9][a-z0-9+.-]*$/.test(entry.Package ?? '') || !entry.Version
+      || ![arch, 'all'].includes(entry.Architecture)
+      || !/^[a-f0-9]{64}$/i.test(entry.SHA256 ?? '')
+      || !Number.isSafeInteger(Number(entry.Size)) || Number(entry.Size) <= 0
+      || !/^[a-zA-Z0-9_+./:%-]+$/.test(entry.Filename ?? '')
+      || entry.Filename.startsWith('/') || entry.Filename.includes('..')) {
+    throw new Error('Invalid or incomplete Termux package lock entry')
+  }
+}
+
 /**
  * Download and unpack the runtime packages.
  *
@@ -131,9 +162,11 @@ export function resolveClosure(index, roots) {
  */
 export async function unpackRuntime(options) {
   const arch = options.arch ?? ARCH
-  const index = await readIndex(arch)
-  const packages = resolveClosure(index, ROOTS)
-  const debDir = path.join(options.cacheDir, 'deb')
+  const packages = await lockedPackages({ ...options, arch })
+  const debDir = path.join(options.cacheDir, 'deb', arch)
+  const tarDir = path.join(options.root, '.packages')
+  rmSync(tarDir, { recursive: true, force: true })
+  mkdirSync(tarDir, { recursive: true })
   mkdirSync(debDir, { recursive: true })
   const binDir = path.join(options.root, 'bin')
   const libDir = path.join(options.root, 'lib')
@@ -143,32 +176,45 @@ export async function unpackRuntime(options) {
   mkdirSync(libDir, { recursive: true })
 
   for (const entry of packages) {
-    if (entry.Architecture !== arch) continue
+    if (entry.Architecture !== arch && entry.Architecture !== 'all') continue
     const file = path.join(debDir, entry.Filename.split('/').pop().replace(':', '%3a'))
-    await download(`${MIRROR}/${entry.Filename.replace(':', '%3a')}`, file)
+    await download(`${MIRROR}/${entry.Filename.replace(':', '%3a')}`, file, entry)
     const dataMember = listAr(file).find((member) => member.name.startsWith('data.tar'))
     if (dataMember === undefined) throw new Error(`data.tar がありません: ${file}`)
-    const tarPath = path.join(debDir, `${entry.Package}.tar`)
+    const tarPath = path.join(tarDir, `${entry.Package}.tar`)
     extractArMember(file, dataMember.name, tarPath)
     untar(tarPath, libDir, binDir)
   }
 
-  materializeLinks(debDir, libDir)
+  materializeLinks(tarDir, libDir)
+  rmSync(tarDir, { recursive: true, force: true })
+  for (const name of ['node', 'bash']) {
+    if (!existsSync(path.join(binDir, name))) throw new Error(`Extraction did not produce ${name}`)
+  }
   return { packages, bin: binDir, lib: libDir }
 }
 
 /**
- * Fetch a file unless the cache already has it.
+ * Fetch a file only if the cache does not contain the exact locked bytes.
  *
  * @param {string} url - The source.
  * @param {string} file - The destination.
  * @returns {Promise<void>} A promise that resolves once the file is cached.
  */
-async function download(url, file) {
-  if (existsSync(file) && statSync(file).size > 0) return
-  const response = await fetch(url)
+export async function download(url, file, entry, fetcher = fetch) {
+  const verify = buffer => buffer.length === Number(entry.Size)
+    && createHash('sha256').update(buffer).digest('hex') === entry.SHA256.toLowerCase()
+  if (existsSync(file)) {
+    if (verify(readFileSync(file))) return
+    rmSync(file)
+  }
+  const response = await fetcher(url, { signal: AbortSignal.timeout(60000) })
   if (!response.ok) throw new Error(`${url} -> HTTP ${response.status}`)
-  writeFileSync(file, Buffer.from(await response.arrayBuffer()))
+  const buffer = Buffer.from(await response.arrayBuffer())
+  if (!verify(buffer)) throw new Error(`Package size/SHA-256 mismatch: ${entry.Package}`)
+  const partial = `${file}.part`
+  try { writeFileSync(partial, buffer); renameSync(partial, file) }
+  finally { rmSync(partial, { force: true }) }
 }
 
 /**
@@ -232,10 +278,8 @@ function untar(tarPath, libDir, binDir) {
       '--exclude=*/usr/share/aclocal*', '--exclude=*/usr/share/icu*',
       '--exclude=*/usr/lib/icu/*',
     ], { stdio: 'ignore' })
-  } catch {
-    // Symlinks and a few doc paths cannot be created on Windows; the files
-    // that matter (`bin/`, versioned `lib/*.so*`) are regular files and are
-    // already unpacked.
+  } catch (cause) {
+    throw new Error(`Cannot extract ${tarPath}; use Linux/WSL with tar and xz support`, { cause })
   }
   moveTree(path.join(staging, 'files', 'usr', 'bin'), binDir)
   moveTree(path.join(staging, 'files', 'usr', 'lib'), libDir)
@@ -268,13 +312,8 @@ function moveTree(from, to) {
  */
 export function materializeLinks(debDir, libDir) {
   const links = new Map()
-  for (const file of readdirSync(debDir).filter((name) => name.endsWith('.tar'))) {
-    let listing = ''
-    try {
-      listing = execFileSync('tar', ['-tvf', path.join(debDir, file)], { encoding: 'utf8' })
-    } catch (error) {
-      listing = String(error.stdout ?? '')
-    }
+  for (const file of readdirSync(debDir).filter((name) => name.endsWith('.tar')).sort()) {
+    const listing = execFileSync('tar', ['-tvf', path.join(debDir, file)], { encoding: 'utf8' })
     for (const line of listing.split('\n')) {
       if (!line.startsWith('l')) continue
       const arrow = line.indexOf(' -> ')

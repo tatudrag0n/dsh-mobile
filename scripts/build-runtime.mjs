@@ -8,7 +8,6 @@
  * own data directory and starts `bin/node` against `app/node_modules/...`.
  *
  * Usage:
- *   node scripts/fetch-android-runtime.mjs           # one-time package cache
  *   node scripts/build-runtime.mjs --dsh <dir> [--url <download url>]
  *
  * `--dsh` points at an unpacked DSH desktop runtime (the directory that holds
@@ -25,12 +24,13 @@ import { linkMap } from './lib/elf.mjs'
 import { replaceCString } from './lib/patch.mjs'
 import { TERMUX_ARCH, unpackRuntime } from './lib/termux.mjs'
 import { zip } from './lib/zip.mjs'
+import { runtimeUrl } from './lib/release.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repo = path.resolve(here, '..')
 
 /** The version string stored in the bundle manifest. */
-const VERSION = '1.2.0'
+const VERSION = JSON.parse(readFileSync(path.join(repo, 'package.json'), 'utf8')).version
 
 /** Directories inside a DSH runtime tree that only exist for other platforms. */
 const FOREIGN = [
@@ -53,8 +53,8 @@ if (ARCH === undefined) {
   process.exit(2)
 }
 
-/** Where a released bundle lives unless `--url` overrides it. */
-const DEFAULT_URL = `https://github.com/tatudrag0n/dsh-mobile/releases/latest/download/dsh-mobile-runtime-${ABI}.zip`
+// Validate the URL before modifying any generated artifacts.
+const releaseUrl = runtimeUrl(VERSION, ABI, args.url)
 
 const dshTree = args.dsh ?? process.env.DSH_RUNTIME_DIR
 if (dshTree === undefined || !existsSync(path.join(dshTree, 'node_modules', '@deepseek-ai', 'dsh'))) {
@@ -70,7 +70,8 @@ rmSync(bundle, { recursive: true, force: true })
 mkdirSync(bundle, { recursive: true })
 
 console.log('1/6 Termux パッケージを展開しています…')
-const unpacked = await unpackRuntime({ cacheDir: path.join(outDir, 'cache'), root: bundle, arch: ARCH })
+const unpacked = await unpackRuntime({ cacheDir: path.join(outDir, 'cache'), root: bundle, arch: ARCH,
+  lockFile: path.resolve(args.lock ?? path.join(repo, 'runtime', 'termux-lock.json')), updateLock: args['update-lock'] === 'true' })
 console.log(`    ${unpacked.packages.map((entry) => `${entry.Package} ${entry.Version}`).join(', ')}`)
 
 console.log('2/6 DSH のパッケージツリーをコピーしています…')
@@ -109,7 +110,7 @@ const binaries = new Map([
   ['bash', path.join(unpacked.bin, 'bash')],
 ])
 const libraries = new Map()
-for (const name of readdirSync(unpacked.lib)) {
+for (const name of readdirSync(unpacked.lib).sort()) {
   if (!/^lib.*\.so/.test(name)) continue
   const file = path.join(unpacked.lib, name)
   if (existsSync(file) && statSync(file).isFile()) libraries.set(name, file)
@@ -155,7 +156,7 @@ const manifest = {
   abi: ABI,
   node: nodePackage === undefined ? 'unknown' : nodePackage.Version,
   dsh: dshPackage.version,
-  builtAt: new Date().toISOString(),
+  builtAt: new Date(Number(process.env.SOURCE_DATE_EPOCH ?? 315532800) * 1000).toISOString(),
 }
 writeFileSync(path.join(bundle, 'runtime.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 
@@ -167,7 +168,6 @@ writeFileSync(zipPath, archive)
 const sha256 = createHash('sha256').update(archive).digest('hex')
 
 console.log('6/6 マニフェストをアプリの assets に書いています…')
-const releaseUrl = args.url ?? DEFAULT_URL
 const assetsDir = path.join(repo, 'android', 'app', 'src', 'main', 'assets')
 mkdirSync(assetsDir, { recursive: true })
 const manifestFile = path.join(assetsDir, 'runtime-manifest.json')
@@ -228,7 +228,7 @@ function pruneNativePrebuilds(nodeModules) {
 function collect(root) {
   const entries = []
   const walk = (directory, prefix) => {
-    for (const name of readdirSync(directory)) {
+    for (const name of readdirSync(directory).sort()) {
       const full = path.join(directory, name)
       const relative = prefix === '' ? name : `${prefix}/${name}`
       const info = statSync(full)

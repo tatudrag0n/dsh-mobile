@@ -179,7 +179,7 @@ final class HostProcess {
 		// A START_STICKY redelivery or a second "start" is not a reason to run a
 		// second node: the two would fight over the port and the phone would show
 		// the boot failure card with EADDRINUSE in the log.
-		if (process != null && process.isAlive()) return;
+		if (alive(process)) return;
 		// A node process can also outlive a force-stop and keep the port of the
 		// previous run, so anything recorded under our own pid file goes first.
 		stopLeftover();
@@ -251,7 +251,7 @@ final class HostProcess {
 	 */
 	boolean isRunning() {
 		Process current = process;
-		return current != null && current.isAlive();
+		return alive(current);
 	}
 
 	/**
@@ -263,14 +263,31 @@ final class HostProcess {
 		if (current == null) return;
 		current.destroy();
 		try {
-			if (!current.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) current.destroyForcibly();
+			long deadline = android.os.SystemClock.elapsedRealtime() + 5000;
+			while (alive(current) && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(50);
+			if (alive(current)) forceStop(current);
 		} catch (InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
-			current.destroyForcibly();
+			forceStop(current);
 		}
 		process = null;
 		// Nothing of ours is running any more, so the pid file is stale.
 		pidFile().delete();
+	}
+
+	private static boolean alive(Process process) {
+		if (process == null) return false;
+		try { process.exitValue(); return false; }
+		catch (IllegalThreadStateException running) { return true; }
+	}
+
+	private void forceStop(Process process) {
+		if (android.os.Build.VERSION.SDK_INT >= 26) process.destroyForcibly();
+		else {
+			int pid = pidOf(process);
+			if (pid > 0) android.os.Process.killProcess(pid);
+			else process.destroy();
+		}
 	}
 
 	/**

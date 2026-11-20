@@ -6,7 +6,6 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -905,11 +904,9 @@ public class MainActivity extends Activity {
 			.setTitle("ランタイムを削除")
 			.setMessage("スマホ上の Node と DSH のファイルを削除します。会話と設定（ホーム）は残ります。")
 			.setPositiveButton("削除", (dialog, which) -> {
-				HostService.stopHost(this);
-				RuntimeStore.uninstall(this);
+				HostService.resetRuntime(this);
 				loadedUrl = "";
-				statusText.setText("次回起動時にダウンロードします");
-				HostService.startHost(this);
+				statusText.setText("Host を停止してランタイムを再取得します");
 			})
 			.setNegativeButton("キャンセル", null)
 			.show();

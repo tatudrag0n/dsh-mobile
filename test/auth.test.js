@@ -358,8 +358,14 @@ test("the PIN door answers over a real loopback socket", async () => {
 		assert.equal(read.status, 200);
 		assert.equal((await read.json()).status, "pin-required");
 
+		const accepted = await post("123456", "10.9.9.9");
+		assert.equal(accepted.status, 200);
+		const payload = await accepted.json();
+		assert.equal(payload.status, "ok");
+		assert.ok(payload.url.includes("token=stub"));
+		assert.equal(payload.pinRequired, false);
 		for (let attempt = 0; attempt < 2; attempt += 1) {
-			const wrong = await post("000000");
+			const wrong = await post("000000", `198.51.100.${attempt}`);
 			assert.equal(wrong.status, 403);
 			assert.equal((await wrong.json()).reason, "wrong");
 		}
@@ -369,16 +375,38 @@ test("the PIN door answers over a real loopback socket", async () => {
 		const stillLocked = await post("123456");
 		assert.equal(stillLocked.status, 403);
 
-		// Another phone is not punished for this one's typos, and the right PIN
-		// hands it the launch URL.
-		const accepted = await post("123456", "10.9.9.9");
-		assert.equal(accepted.status, 200);
-		const payload = await accepted.json();
-		assert.equal(payload.status, "ok");
-		assert.ok(payload.url.includes("token=stub"));
-		assert.equal(payload.pinRequired, false);
+		// Changing caller-controlled forwarding headers cannot escape a lockout.
+		for (const address of ["10.9.9.9", "203.0.113.1", "192.168.0.2, 127.0.0.1"]) {
+			const spoofed = await post("123456", address);
+			assert.equal(spoofed.status, 403);
+			assert.equal((await spoofed.json()).reason, "locked");
+		}
 	} finally {
 		await new Promise((resolve) => server.close(resolve));
+		await rm(home, { recursive: true, force: true, maxRetries: 5 });
+	}
+});
+
+test("public routes reject oversized PIN bodies and never acknowledge unimplemented sync", async () => {
+	const { routes, home } = await mountHost({ pairPath: "/ops", pin: "123456" });
+	const server = createServer((request, response) => {
+		const route = routes.get(request.url);
+		if (!route) { response.writeHead(404); response.end(); return; }
+		Promise.resolve(route.handler(request, response)).catch(error => { response.writeHead(500); response.end(error.message); });
+	});
+	await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+	const base = `http://127.0.0.1:${server.address().port}`;
+	try {
+		const large = await fetch(`${base}/ops/pair`, { method: "POST", body: "x".repeat(1025) });
+		assert.equal(large.status, 413); assert.equal((await large.json()).reason, "body-too-large");
+		for (const method of ["GET", "POST"]) {
+			const response = await fetch(`${base}/ops/sync`, { method, ...(method === "POST" ? { body: "not-json" } : {}) });
+			assert.equal(response.status, 501); assert.equal((await response.json()).reason, "sync-not-implemented");
+		}
+		const valid = await fetch(`${base}/ops/pair`, { method: "POST", body: JSON.stringify({ pin: "123456" }) });
+		assert.equal(valid.status, 200);
+	} finally {
+		await new Promise(resolve => server.close(resolve));
 		await rm(home, { recursive: true, force: true, maxRetries: 5 });
 	}
 });

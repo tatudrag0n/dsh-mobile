@@ -34,8 +34,8 @@ import java.util.Locale;
  * are Android APIs that only this app can call. The two therefore talk over a
  * plain HTTP endpoint bound to 127.0.0.1 on a random port, guarded by a random
  * bearer token that is written to `$DSH_HOME/bridge.json` - a file only this
- * app and the Host (same uid) can read. No part of it is reachable from
- * another app, and nothing leaves the device.
+ * app and the Host (same uid) can read. The socket is reachable by other network-capable apps on the phone;
+ * the private token, not loopback alone, is the authorization boundary.
  *
  * Every response is JSON `{ok: true, ...}` or `{ok: false, error}`, so the
  * plugin can turn a platform refusal into a tool error that names the cause.
@@ -48,7 +48,7 @@ final class PhoneBridge {
 	private static final int MAX_BODY = 64 * 1024;
 
 	/** How long a client may take to send its request. */
-	private static final int READ_TIMEOUT_MS = 30000;
+	private static final int READ_TIMEOUT_MS = 5000;
 
 	private final Context context;
 	private final SecureRandom random = new SecureRandom();
@@ -57,12 +57,18 @@ final class PhoneBridge {
 	private volatile boolean running;
 	private int port = -1;
 	private String token = "";
+	private final java.util.Set<Socket> connections = java.util.concurrent.ConcurrentHashMap.newKeySet();
+	private final java.util.concurrent.ThreadPoolExecutor workers = new java.util.concurrent.ThreadPoolExecutor(
+		4, 4, 0L, java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(8));
+	private final java.util.concurrent.ScheduledThreadPoolExecutor deadlines =
+		new java.util.concurrent.ScheduledThreadPoolExecutor(1);
 
 	/**
 	 * @param context - the app context.
 	 */
 	PhoneBridge(Context context) {
 		this.context = context.getApplicationContext();
+		deadlines.setRemoveOnCancelPolicy(true);
 	}
 
 	/**
@@ -93,7 +99,9 @@ final class PhoneBridge {
 		} catch (IOException ignored) {
 			// Closing is best effort.
 		}
-		server = null;
+		for (Socket socket : connections) closeSocket(socket);
+		workers.shutdownNow();
+		deadlines.shutdownNow();
 	}
 
 	/**
@@ -134,9 +142,23 @@ final class PhoneBridge {
 		while (running) {
 			try {
 				Socket socket = server.accept();
-				Thread worker = new Thread(() -> handle(socket), "phone-bridge-conn");
-				worker.setDaemon(true);
-				worker.start();
+				connections.add(socket);
+				try {
+					java.util.concurrent.ScheduledFuture<?> deadline = deadlines.schedule(
+						() -> closeSocket(socket), 10, java.util.concurrent.TimeUnit.SECONDS);
+					try {
+						workers.execute(() -> {
+							try { handle(socket); }
+							finally { deadline.cancel(false); connections.remove(socket); closeSocket(socket); }
+						});
+					} catch (java.util.concurrent.RejectedExecutionException busy) {
+						deadline.cancel(false);
+						throw busy;
+					}
+				} catch (java.util.concurrent.RejectedExecutionException busy) {
+					connections.remove(socket);
+					closeSocket(socket);
+				}
 			} catch (IOException failure) {
 				if (running) Log.w(TAG, "bridge accept failed: " + failure.getMessage());
 				return;
@@ -155,6 +177,10 @@ final class PhoneBridge {
 	 *
 	 * @param socket - the accepted connection.
 	 */
+	private static void closeSocket(Socket socket) {
+		try { socket.close(); } catch (IOException ignored) { }
+	}
+
 	private void handle(Socket socket) {
 		try (Socket connection = socket) {
 			connection.setSoTimeout(READ_TIMEOUT_MS);
@@ -173,20 +199,31 @@ final class PhoneBridge {
 				int length = 0;
 				String authorization = null;
 				String line;
+				int headerBytes = 0;
+				int headerCount = 0;
+				boolean hasLength = false;
 				while ((line = readLine(input)) != null && !line.isEmpty()) {
+					if (++headerCount > 64 || (headerBytes += line.length()) > 16384) {
+						write(connection, 431, error("ヘッダが長すぎます")); return;
+					}
 					int colon = line.indexOf(':');
 					if (colon < 0) continue;
 					String name = line.substring(0, colon).trim().toLowerCase(Locale.ROOT);
 					String value = line.substring(colon + 1).trim();
-					if (name.equals("content-length")) length = Integer.parseInt(value);
+					if (name.equals("transfer-encoding")) { write(connection, 400, error("Transfer-Encoding is unsupported")); return; }
+					if (name.equals("content-length")) {
+						if (hasLength || !value.matches("[0-9]{1,9}")) { write(connection, 400, error("Invalid Content-Length")); return; }
+						hasLength = true;
+						length = Integer.parseInt(value);
+					}
 					if (name.equals("authorization")) authorization = value;
 				}
-				byte[] body = readBytes(input, Math.max(0, Math.min(length, MAX_BODY)));
-
 				if (!authorized(authorization)) {
 					write(connection, 401, error("ブリッジのトークンが違います"));
 					return;
 				}
+				if (length > MAX_BODY) { write(connection, 413, error("Body too large")); return; }
+				byte[] body = readBytes(input, length);
 				if (method.equals("GET") && path.equals("/health")) {
 					JSONObject payload = new JSONObject();
 					payload.put("ok", true);
@@ -254,7 +291,7 @@ final class PhoneBridge {
 		int offset = 0;
 		while (offset < count) {
 			int read = input.read(body, offset, count - offset);
-			if (read < 0) break;
+			if (read < 0) throw new IOException("Incomplete request body");
 			offset += read;
 		}
 		return offset == count ? body : java.util.Arrays.copyOf(body, offset);

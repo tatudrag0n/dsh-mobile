@@ -52,7 +52,14 @@ public class HostService extends Service {
 
 	private HostProcess host;
 	private PhoneBridge bridge;
-	private Thread worker;
+	// One executor across service instances: a replacement cannot modify the
+	// runtime or pid file until the old boot and cleanup have finished.
+	private static final java.util.concurrent.ExecutorService WORK =
+		java.util.concurrent.Executors.newSingleThreadExecutor();
+	private final HostLifecycle lifecycle = new HostLifecycle();
+	private java.util.concurrent.Future<?> worker;
+	private boolean timedOut;
+	private boolean resetOnDestroy;
 
 	/**
 	 * The current phase.
@@ -111,6 +118,12 @@ public class HostService extends Service {
 		context.stopService(new Intent(context, HostService.class));
 	}
 
+	static void resetRuntime(Context context) {
+		Intent intent = new Intent(context, HostService.class).setAction("dev.tatudrag0n.dshmobile.RESET");
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent);
+		else context.startService(intent);
+	}
+
 	@Override
 	public void onCreate() {
 		super.onCreate();
@@ -120,28 +133,64 @@ public class HostService extends Service {
 	@Override
 	public int onStartCommand(Intent intent, int flags, int startId) {
 		startForeground(NOTIFICATION, notification(statusText()));
-		if (worker == null || !worker.isAlive()) {
-			worker = new Thread(this::boot, "dsh-host-service");
-			worker.setDaemon(true);
-			worker.start();
+		if (intent != null && "dev.tatudrag0n.dshmobile.RESET".equals(intent.getAction())) {
+			resetOnDestroy = true;
+			stopSelf();
+			return START_NOT_STICKY;
 		}
-		return START_STICKY;
+		if (lifecycle.start()) worker = WORK.submit(this::boot);
+		// Do not restart a timed-out dataSync service behind the user's back.
+		return START_NOT_STICKY;
+	}
+
+	@Override
+	public void onTimeout(int startId, int foregroundServiceType) {
+		timedOut = true;
+		shutdown();
+		state = State.FAILED;
+		url = "";
+		failure = "Android のバックグラウンド実行時間の上限に達しました。アプリを開いて Host を再起動してください。";
+		message = failure;
+		stopForeground(STOP_FOREGROUND_REMOVE);
+		stopSelf();
+	}
+
+	private void shutdown() {
+		lifecycle.stop();
+		if (worker != null) worker.cancel(true);
+		WORK.execute(this::cleanup);
+	}
+
+	private void cleanup() {
+		if (host != null) { host.stop(); host = null; }
+		if (bridge != null) { bridge.stop(); bridge = null; }
 	}
 
 	@Override
 	public void onDestroy() {
+		shutdown();
+		if (!timedOut) {
+			state = State.IDLE;
+			message = "";
+			url = "";
+		}
+		if (resetOnDestroy) WORK.execute(() -> {
+			RuntimeStore.uninstall(this);
+			new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+				try { startHost(this); }
+				catch (RuntimeException denied) {
+					state = State.FAILED;
+					failure = "ランタイムを削除しました。アプリを開いて Host を起動してください。";
+					message = failure;
+				}
+			});
+		});
 		super.onDestroy();
-		state = State.IDLE;
-		message = "";
-		url = "";
-		if (host != null) {
-			host.stop();
-			host = null;
-		}
-		if (bridge != null) {
-			bridge.stop();
-			bridge = null;
-		}
+	}
+
+	private void phase(State next, String text) throws java.io.IOException {
+		lifecycle.check();
+		lifecycle.publish(() -> { state = next; message = text; updateNotification(); });
 	}
 
 	@Override
@@ -154,26 +203,26 @@ public class HostService extends Service {
 	 */
 	private void boot() {
 		try {
+			lifecycle.check();
+			RuntimeStore.recover(this);
 			// An app update moves the native library directory the runtime's
 			// executables link into, so a broken link is repaired before it is
 			// mistaken for a missing runtime.
-			if (!RuntimeStore.isInstalled(this) && !RuntimeStore.ensureLinks(this)) {
-				state = State.INSTALLING;
-				message = "ランタイムを取得しています…";
-				updateNotification();
+			if (!RuntimeStore.isCompatible(this) || !RuntimeStore.ensureLinks(this)) {
+				phase(State.INSTALLING, "ランタイムを取得しています…");
 				installRuntime();
 			}
 			if (!RuntimeStore.isInstalled(this)) {
 				throw new IllegalStateException("ランタイムを用意できませんでした");
 			}
 
-			state = State.STARTING;
-			message = "スマホの操作ブリッジを準備しています…";
-			updateNotification();
-			if (bridge == null) {
-				bridge = new PhoneBridge(this);
-				bridge.start();
-			}
+			phase(State.STARTING, "スマホの操作ブリッジを準備しています…");
+			lifecycle.create(() -> {
+				if (bridge == null) {
+					bridge = new PhoneBridge(this);
+					bridge.start();
+				}
+			});
 
 			int hostPort = HostProcess.preferredPort();
 			// One line the support case can be read from: a fallback port means
@@ -183,16 +232,17 @@ public class HostService extends Service {
 				+ (hostPort == HostProcess.PREFERRED_PORT ? " (preferred)" : " (fallback)"));
 			RuntimeStore.prepareHome(this, hostPort, bridge.port(), bridge.token());
 
-			message = "Host を起動しています…";
-			updateNotification();
+			phase(State.STARTING, "Host を起動しています…");
 			host = new HostProcess(this, new HostProcess.Listener() {
 				@Override
 				public void onUrl(String launchUrl) {
-					url = launchUrl;
-					state = State.READY;
-					message = "起動しました";
-					failure = "";
-					updateNotification();
+					lifecycle.publish(() -> {
+						url = launchUrl;
+						state = State.READY;
+						message = "起動しました";
+						failure = "";
+						updateNotification();
+					});
 				}
 
 				@Override
@@ -202,47 +252,47 @@ public class HostService extends Service {
 
 				@Override
 				public void onExit(int code) {
-					if ((idle())) return;
-					state = State.FAILED;
-					url = "";
-					failure = "Host が終了しました (exit " + code + ")。" + tail();
-					message = failure;
-					updateNotification();
+					lifecycle.publish(() -> {
+						state = State.FAILED;
+						url = "";
+						failure = "Host が終了しました (exit " + code + ")。" + tail();
+						message = failure;
+						updateNotification();
+					});
 				}
 			});
 			// A port that a leftover node still holds must not become a boot failure
-		// card: the home is prepared again for the next free port and the Host is
-		// started there. Three attempts walk past a stale process without
-		// looping, and the last failure is reported as it always was.
-		int port = hostPort;
-		for (int attempt = 0; ; attempt += 1) {
-			try {
-				host.start(port);
-				break;
-			} catch (java.io.IOException busy) {
-				if (attempt >= 2) throw busy;
-				port = HostProcess.portAfter(port);
-				RuntimeStore.prepareHome(this, port, bridge.port(), bridge.token());
-				Log.w(TAG, "host: port busy, retrying on " + port + " (" + busy.getMessage() + ")");
+			// card: the home is prepared again for the next free port and the Host is
+			// started there. Three attempts walk past a stale process without
+			// looping, and the last failure is reported as it always was.
+			int port = hostPort;
+			for (int attempt = 0; ; attempt += 1) {
+				try {
+					final int attemptPort = port;
+					lifecycle.create(() -> host.start(attemptPort));
+					lifecycle.check();
+					break;
+				} catch (java.io.IOException busy) {
+					lifecycle.check();
+					if (attempt >= 2) throw busy;
+					port = HostProcess.portAfter(port);
+					RuntimeStore.prepareHome(this, port, bridge.port(), bridge.token());
+					Log.w(TAG, "host: port busy, retrying on " + port + " (" + busy.getMessage() + ")");
+				}
 			}
+		} catch (Exception error) {
+			lifecycle.publish(() -> {
+				state = State.FAILED;
+				url = "";
+				failure = String.valueOf(error.getMessage());
+				message = failure;
+				Log.e(TAG, "host boot failed", error);
+				updateNotification();
+			});
+			cleanup();
+		} finally {
+			if (!lifecycle.active()) cleanup();
 		}
-		} catch (Exception failure) {
-			state = State.FAILED;
-			url = "";
-			this.failure = String.valueOf(failure.getMessage());
-			message = this.failure;
-			Log.e(TAG, "host boot failed", failure);
-			updateNotification();
-		}
-	}
-
-	/**
-	 * Whether the service is being torn down.
-	 *
-	 * @return the answer.
-	 */
-	private boolean idle() {
-		return state == State.IDLE;
 	}
 
 	/**
@@ -256,18 +306,15 @@ public class HostService extends Service {
 		File archive;
 		if (manifest != null) {
 			archive = RuntimeStore.download(this, manifest, (percent, text) -> {
-				message = text;
-				updateNotification();
+				lifecycle.publish(() -> { message = text; updateNotification(); });
 			});
 		} else {
 			throw new IllegalStateException(
-				"この APK にはランタイムの入手先が入っていません。設定からランタイムの zip を選んでください。");
+				"この APK には対応するランタイムのマニフェストがありません。ランタイム付きの APK をインストールしてください。");
 		}
-		message = "展開しています…";
-		updateNotification();
+		phase(State.INSTALLING, "展開しています…");
 		RuntimeStore.install(this, archive, (percent, text) -> {
-			message = text;
-			updateNotification();
+			lifecycle.publish(() -> { message = text; updateNotification(); });
 		});
 		archive.delete();
 	}
@@ -313,6 +360,9 @@ public class HostService extends Service {
 	 * Refresh the foreground notification.
 	 */
 	private void updateNotification() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+			&& checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+				!= android.content.pm.PackageManager.PERMISSION_GRANTED) return;
 		NotificationManager manager = getSystemService(NotificationManager.class);
 		if (manager != null) manager.notify(NOTIFICATION, notification(statusText()));
 	}

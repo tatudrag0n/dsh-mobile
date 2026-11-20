@@ -10,7 +10,7 @@
  *   - a sync chip that shows the live state of the link to the PC Host and
  *     re-establishes it on tap;
  *   - an outbox: a message written while the PC is unreachable is kept and
- *     sent as soon as the link comes back, without the user retyping it;
+ *     kept with its destination; only acknowledged sends leave the queue;
  *   - installability: a service worker for the offline shell and the iOS
  *     home-screen metadata.
  *
@@ -517,143 +517,81 @@ html[data-dsh-mobile-keyboard] .dsh-mobile-nav { display: none !important; }
 			return (input.innerText ?? input.textContent ?? "").replace(/ /g, " ").trim();
 		}
 
-		/**
-		 * The outbox: drafts written while the PC was unreachable.
-		 *
-		 * The composer owns the draft; the outbox only remembers that a
-		 * send was attempted while the link was down, so the message can go
-		 * out on its own once the link returns. The text itself stays in the
-		 * composer, which is what the application restores after a failed
-		 * send — so the user can still edit it before it leaves.
-		 * @param services - the optional session services.
-		 * @returns the outbox handle.
+		/** Durable, session-bound outbox. Only an acknowledged send removes an item.
+		 * A failed/abandoned request has unknown delivery status: never retry it
+		 * automatically, since the upstream API has no idempotency-key contract.
 		 */
 		function createOutbox(services) {
 			const items = [];
-			let timer;
+			let inFlight = false;
 			let lastEditAt = 0;
-			/**
-			 * How long the composer must stay quiet before an automatic send
-			 * may interrupt it.
-			 */
-			const QUIET_MS = 1500;
-
-			/**
-			 * Persist the outbox.
-			 */
+			const currentId = () => services.uiSession?.current?.value?.key;
+			const newId = () => Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, "0")).join("");
 			function save() {
-				try {
-					window.localStorage.setItem(OUTBOX_KEY, JSON.stringify(items));
-				} catch {
-					/* a private-mode browser simply keeps it in memory */
-				}
+				try { window.localStorage.setItem(OUTBOX_KEY, JSON.stringify(items)); }
+				catch { console.warn("[dsh-mobile] outbox is only stored in memory"); }
 			}
-
-			/**
-			 * Read the outbox back.
-			 */
 			function load() {
 				try {
-					const raw = window.localStorage.getItem(OUTBOX_KEY);
-					const parsed = raw === null ? [] : JSON.parse(raw);
-					if (Array.isArray(parsed)) items.push(...parsed.filter((entry) => typeof entry?.text === "string"));
-				} catch {
-					/* ignore a corrupt entry */
-				}
+					const parsed = JSON.parse(window.localStorage.getItem(OUTBOX_KEY) ?? "[]");
+					if (!Array.isArray(parsed)) return;
+					for (const entry of parsed) {
+						if (typeof entry?.text !== "string") continue;
+						items.push({ ...entry, id: entry.id || newId(),
+							// Legacy entries have no safe destination. Keep for recovery only.
+							sessionId: typeof entry.sessionId === "string" ? entry.sessionId : null,
+							status: entry.status === "pending" ? "pending" : "uncertain" });
+					}
+				} catch { /* leave corrupt storage untouched until the next user action */ }
 			}
-
-			/**
-			 * Add a draft to the outbox.
-			 * @param text - the draft text.
-			 */
-			function add(text) {
-				if (text === "") return;
-				items.push({ text, at: Date.now() });
+			function add(text, sessionId = currentId()) {
+				if (!text) return;
+				items.push({ id: newId(), text, sessionId: sessionId ?? null, at: Date.now(), status: "pending" });
 				save();
 			}
-
-			/**
-			 * Drop every queued draft.
-			 */
 			function clear() {
+				if (inFlight) return;
 				items.length = 0;
 				save();
 			}
-
-			/**
-			 * Remember a send attempt made while the link was down.
-			 *
-			 * The application restores the draft after a failed send, so the
-			 * text is read again a moment later: if it is still there, the
-			 * message really is waiting.
-			 */
 			function rememberAttempt() {
-				const before = readDraft();
-				if (before === "") return;
-				window.clearTimeout(timer);
-				timer = window.setTimeout(() => {
-					const after = readDraft();
-					if (after === "") return;
-					if (!items.some((entry) => entry.text === after)) add(after);
-				}, 800);
+				const text = readDraft();
+				const sessionId = currentId();
+				if (!items.some(entry => entry.text === text && entry.sessionId === sessionId)) add(text, sessionId);
 			}
-
-			/**
-			 * Send what is waiting.
-			 *
-			 * The composer's own send button is used when the draft is still
-			 * in the composer: the application then clears it on success and
-			 * the user keeps the usual behaviour. When the composer is empty
-			 * but the outbox is not, the message goes through the session
-			 * service instead.
-			 * @returns whether something was sent.
-			 */
-			function flush() {
-				const draft = readDraft();
-				if (draft !== "") {
-					const send = document.querySelector(COMPOSER_SEND);
-					if (send !== null && !send.disabled) {
-						send.click();
-						clear();
-						return true;
-					}
+			async function flush({ manual = false } = {}) {
+				if (inFlight) return false;
+				// Never click a composer button: it has no acknowledgement contract.
+				// Leave edited drafts alone; the queue contains the exact attempted text.
+				if (readDraft() !== "") {
+					if (manual) window.alert("下書きを確認し、入力欄を空にしてから送信待ちメッセージを送ってください。");
+					return false;
 				}
-				const first = items[0];
-				if (first === undefined) return false;
-				const session = currentSession();
-				if (session === undefined) return false;
-				session.conversation.send(first.text).then(() => {
-					items.shift();
+				const entry = items.find(item => item.sessionId === currentId() && item.sessionId);
+				if (!entry || !services.sessions) return false;
+				if (entry.status !== "pending" && (!manual || !window.confirm(
+					"前回の送信結果を確認できません。会話履歴を確認しましたか？再送すると重複する場合があります。"))) return false;
+				inFlight = true;
+				entry.status = "sending";
+				save();
+				try {
+					await services.sessions.scope(entry.sessionId).conversation.send(entry.text);
+					const index = items.findIndex(item => item.id === entry.id);
+					if (index !== -1) items.splice(index, 1);
 					save();
-				}).catch((error) => {
-					console.warn("[dsh-mobile] outbox flush failed:", error);
-				});
-				return true;
+					return true;
+				} catch (error) {
+					entry.status = "uncertain";
+					save();
+					console.warn("[dsh-mobile] delivery unconfirmed; manual review required:", error);
+					return false;
+				} finally { inFlight = false; }
 			}
-
-			/**
-			 * Whether the composer has been quiet long enough to send.
-			 * @returns the answer.
-			 */
-			function isQuiet() {
-				return Date.now() - lastEditAt > QUIET_MS;
-			}
-
-			/**
-			 * The session the phone is looking at.
-			 * @returns the scoped session context, or undefined.
-			 */
-			function currentSession() {
-				const sessions = services.sessions;
-				const uiSession = services.uiSession;
-				if (sessions === undefined || uiSession === undefined) return undefined;
-				const id = uiSession.current?.value?.key;
-				if (id === undefined) return undefined;
-				return sessions.scope(id);
-			}
-
 			load();
-			return { items, add, clear, flush, rememberAttempt, readDraft, isQuiet, touch: () => { lastEditAt = Date.now(); } };
+			return { items, add, clear, flush, rememberAttempt, readDraft,
+				matchesDraft: () => items.some(entry => entry.sessionId === currentId() && entry.text === readDraft()),
+				isQuiet: () => Date.now() - lastEditAt > 1500,
+				touch: () => { lastEditAt = Date.now(); } };
 		}
 
 		/**
@@ -664,19 +602,27 @@ html[data-dsh-mobile-keyboard] .dsh-mobile-nav { display: none !important; }
 		 */
 		function installOutbox(outbox, state) {
 			const onClick = (event) => {
-				if (state() === "connected") return;
 				const target = event.target;
 				if (target === null || typeof target.closest !== "function") return;
 				if (target.closest(COMPOSER_SEND) === null) return;
-				outbox.rememberAttempt();
+				if (state() === "connected" && !outbox.matchesDraft()) return;
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				if (state() === "connected") {
+					window.alert("この下書きは送信待ちに保存されています。入力欄を空にし、送信待ち一覧から送ってください。");
+				} else outbox.rememberAttempt();
 			};
 			const onKeyDown = (event) => {
-				if (state() === "connected") return;
-				if (event.key !== "Enter" || event.shiftKey) return;
+				if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
 				const target = event.target;
 				if (target === null || typeof target.closest !== "function") return;
 				if (target.closest(COMPOSER_INPUT) === null) return;
-				outbox.rememberAttempt();
+				if (state() === "connected" && !outbox.matchesDraft()) return;
+				event.preventDefault();
+				event.stopImmediatePropagation();
+				if (state() === "connected") {
+					window.alert("この下書きは送信待ちに保存されています。入力欄を空にし、送信待ち一覧から送ってください。");
+				} else outbox.rememberAttempt();
 			};
 			const onInput = (event) => {
 				const target = event.target;
@@ -737,7 +683,7 @@ html[data-dsh-mobile-keyboard] .dsh-mobile-nav { display: none !important; }
 				const rows = outbox.items.map((item) => {
 					const row = document.createElement("div");
 					row.className = "dsh-mobile-panel-item";
-					row.textContent = item.text;
+					row.textContent = `${item.sessionId ?? "送信先不明（コピーして復元）"} · ${item.status === "uncertain" ? "送信結果未確認" : "送信待ち"}\n${item.text}`;
 					return row;
 				});
 				panel.replaceChildren();
@@ -749,9 +695,10 @@ html[data-dsh-mobile-keyboard] .dsh-mobile-nav { display: none !important; }
 				actions.className = "dsh-mobile-panel-actions";
 				const send = document.createElement("button");
 				send.type = "button";
-				send.textContent = "今すぐ送信";
-				send.addEventListener("click", () => {
-					outbox.flush();
+				send.textContent = "現在の会話の1件を送信";
+				send.disabled = state() !== "connected";
+				send.addEventListener("click", async () => {
+					await outbox.flush({ manual: true });
 					render();
 				});
 				const discard = document.createElement("button");
@@ -796,15 +743,16 @@ html[data-dsh-mobile-keyboard] .dsh-mobile-nav { display: none !important; }
 				// The link is back: send what was waiting. The composer must
 				// be quiet first, so a half-written message is never cut off.
 				window.clearTimeout(retry);
-				const attempt = () => {
+				const attempt = async () => {
 					if (state() !== "connected") return;
 					if (outbox.items.length === 0) return;
 					if (!outbox.isQuiet()) {
 						retry = window.setTimeout(attempt, 1000);
 						return;
 					}
-					outbox.flush();
+					const sent = await outbox.flush();
 					render();
+					if (sent) retry = window.setTimeout(attempt, 1000);
 				};
 				attempt();
 			});

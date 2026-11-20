@@ -6,7 +6,6 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Environment;
-import android.os.storage.StorageManager;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -293,7 +292,7 @@ final class RuntimeStore {
 		if (!lib.isDirectory() && !lib.mkdirs() && !lib.isDirectory()) throw new IOException("cannot create " + lib);
 		linkAll(links.optJSONObject("bin"), bin, nativeDirectory);
 		linkAll(links.optJSONObject("lib"), lib, nativeDirectory);
-		if (!new File(bin, "node").exists()) throw new IOException("bin/node を用意できませんでした");
+		if (!new File(bin, "node").isFile() || !new File(bin, "bash").isFile()) throw new IOException("bin/node を用意できませんでした");
 	}
 
 	/**
@@ -310,11 +309,13 @@ final class RuntimeStore {
 		while (names.hasNext()) {
 			String name = names.next();
 			String packaged = entries.optString(name, "");
-			if (packaged.isEmpty()) continue;
+			if (!name.matches("[A-Za-z0-9_.+-]+") || !packaged.matches("lib[A-Za-z0-9_.+-]+\\.so")
+				|| name.contains("..") || packaged.contains("..")) throw new IOException("Invalid native mapping");
 			File source = new File(nativeDirectory, packaged);
 			if (!source.isFile()) throw new IOException("同梱されていないファイルです: " + packaged);
 			File link = new File(directory, name);
-			if (link.exists()) continue;
+			if (isSymlink(link) && link.getCanonicalPath().equals(source.getCanonicalPath())) continue;
+			if (link.exists() && !isSymlink(link)) throw new IOException("Expected a native symlink: " + name);
 			if (isSymlink(link)) {
 				// A dangling link from a previous install of the APK: its
 				// native library directory no longer exists.
@@ -345,17 +346,49 @@ final class RuntimeStore {
 	 * @return true when a usable runtime with working links is present.
 	 */
 	static boolean ensureLinks(Context context) {
-		if (!isInstalled(context)) {
-			File runtime = runtimeDir(context);
-			if (!new File(runtime, "libmap.json").isFile()) return false;
-			try {
-				linkExecutables(context, runtime);
-			} catch (IOException broken) {
-				Log.w(TAG, "relink failed: " + broken.getMessage());
-				return false;
-			}
+		try {
+			validateRuntime(context, runtimeDir(context));
+			return isInstalled(context);
+		} catch (IOException broken) {
+			Log.w(TAG, "runtime validation failed: " + broken.getMessage());
+			return false;
 		}
-		return isInstalled(context);
+	}
+
+	/** A digest marker is written only after verifying and validating an archive. */
+	static boolean isCompatible(Context context) {
+		JSONObject expected = manifest(context);
+		if (expected == null) return false;
+		try {
+			String digest = expected.optString("sha256", "");
+			return digest.matches("[a-fA-F0-9]{64}") && digest.equalsIgnoreCase(
+				readText(new File(runtimeDir(context), "installed.sha256")).trim());
+		} catch (IOException missing) { return false; }
+	}
+
+	private static void validateRuntime(Context context, File directory) throws IOException {
+		try {
+			JSONObject info = new JSONObject(readText(new File(directory, "runtime.json")));
+			JSONObject expected = manifest(context);
+			if (expected == null || !expected.optString("abi").equals(info.optString("abi"))) {
+				throw new IOException("ランタイムの ABI が APK と一致しません");
+			}
+			for (String required : new String[] { "app/node_modules/@deepseek-ai/dsh/lib/bin.js",
+				"profile/package.json", "profile/cordis.patch.yml", "plugins/mobile-shell/client.js",
+				"plugins/smartphone-use/index.js" }) {
+				if (!new File(directory, required).isFile()) throw new IOException("Missing runtime file: " + required);
+			}
+			linkExecutables(context, directory);
+		} catch (org.json.JSONException invalid) { throw new IOException("Invalid runtime manifest", invalid); }
+	}
+
+	static void recover(Context context) throws IOException {
+		RuntimeSwap.recover(runtimeDir(context), new File(context.getFilesDir(), "runtime-previous"),
+			directory -> validateRuntime(context, directory), RuntimeStore::deleteTree);
+	}
+
+	private static void checkInterrupted() throws java.io.InterruptedIOException {
+		if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Runtime operation cancelled");
 	}
 
 	/**
@@ -422,6 +455,9 @@ final class RuntimeStore {
 	 * @throws IOException when the download fails or the digest does not match.
 	 */
 	static File download(Context context, JSONObject manifest, Progress listener) throws IOException {
+		checkInterrupted();
+		String expectedDigest = manifest.optString("sha256", "");
+		if (!expectedDigest.matches("[a-fA-F0-9]{64}")) throw new IOException("Missing runtime SHA-256");
 		String url = manifest.optString("url", "");
 		if (url.isEmpty()) throw new IOException("runtime-manifest.json に url がありません");
 		File target = new File(context.getCacheDir(), "dsh-runtime.zip");
@@ -445,6 +481,8 @@ final class RuntimeStore {
 				byte[] buffer = new byte[256 * 1024];
 				int read;
 				while ((read = input.read(buffer)) > 0) {
+					checkInterrupted();
+					if (copied + read > manifest.optLong("bytes", 1024L * 1024 * 1024)) throw new IOException("Runtime download exceeds declared size");
 					output.write(buffer, 0, read);
 					copied += read;
 					if (copied - last > 8L * 1024 * 1024) {
@@ -487,6 +525,13 @@ final class RuntimeStore {
 	 * @throws IOException when the archive is unreadable or an entry escapes.
 	 */
 	static void install(Context context, File archive, Progress listener) throws IOException {
+		checkInterrupted();
+		recover(context);
+		JSONObject expected = manifest(context);
+		String digest = sha256(archive);
+		if (expected == null || !digest.equalsIgnoreCase(expected.optString("sha256", ""))) {
+			throw new IOException("Archive does not match this APK's runtime manifest");
+		}
 		File target = runtimeDir(context);
 		File staging = new File(context.getFilesDir(), "runtime-staging");
 		deleteTree(staging);
@@ -501,7 +546,10 @@ final class RuntimeStore {
 		byte[] buffer = new byte[256 * 1024];
 		try (ZipInputStream input = new ZipInputStream(new java.io.FileInputStream(archive))) {
 			ZipEntry entry;
+			int entries = 0;
 			while ((entry = input.getNextEntry()) != null) {
+				checkInterrupted();
+				if (++entries > 200000) throw new IOException("Too many runtime entries");
 				String name = entry.getName();
 				if (name.startsWith("/") || name.contains("..")) {
 					throw new IOException("アーカイブに不正なパスがあります: " + name);
@@ -520,6 +568,8 @@ final class RuntimeStore {
 				try (FileOutputStream output = new FileOutputStream(out)) {
 					int read;
 					while ((read = input.read(buffer)) > 0) {
+						checkInterrupted();
+						if (written + read > 4L * 1024 * 1024 * 1024) throw new IOException("Runtime expands beyond 4 GiB");
 						output.write(buffer, 0, read);
 						written += read;
 						if (written - last > 16L * 1024 * 1024) {
@@ -537,20 +587,14 @@ final class RuntimeStore {
 			deleteTree(staging);
 			throw failure;
 		}
-		// The old tree is moved aside rather than deleted in place: a directory
-		// that is still being watched by a dying process is a poor rename
-		// target, and moving it keeps the swap to one atomic step.
-		File previous = new File(context.getFilesDir(), "runtime-previous");
-		deleteTree(previous);
-		if (target.exists() && !target.renameTo(previous)) {
-			deleteTree(target);
-		}
-		if (!staging.renameTo(target)) {
-			deleteTree(staging);
-			throw new IOException("ランタイムを所定の場所へ移せませんでした");
-		}
-		deleteTree(previous);
-		linkExecutables(context, target);
+		checkInterrupted();
+		try {
+			validateRuntime(context, staging);
+			writeText(new File(staging, "installed.sha256"), digest);
+			RuntimeSwap.promote(staging, target, new File(context.getFilesDir(), "runtime-previous"),
+				directory -> { checkInterrupted(); validateRuntime(context, directory); },
+				RuntimeStore::deleteTree, File::renameTo);
+		} finally { deleteTree(staging); }
 		String version = "";
 		try {
 			File manifest = new File(target, "runtime.json");
@@ -581,6 +625,8 @@ final class RuntimeStore {
 	 */
 	static void uninstall(Context context) {
 		deleteTree(runtimeDir(context));
+		deleteTree(new File(context.getFilesDir(), "runtime-previous"));
+		deleteTree(new File(context.getFilesDir(), "runtime-staging"));
 		prefs(context).edit().remove(KEY_INSTALLED_VERSION).apply();
 	}
 
@@ -702,8 +748,9 @@ final class RuntimeStore {
 	 * @param file - the root to delete.
 	 */
 	static void deleteTree(File file) {
-		if (file == null || !file.exists()) return;
-		File[] children = file.listFiles();
+		if (file == null || (!file.exists() && !isSymlink(file))) return;
+		// Never follow runtime symlinks into the APK or other trees.
+		File[] children = isSymlink(file) ? null : file.listFiles();
 		if (children != null) for (File child : children) deleteTree(child);
 		if (!file.delete()) file.deleteOnExit();
 	}
